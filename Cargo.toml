@@ -1,0 +1,16 @@
+[package]
+name = "uart-readline"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embedded-hal = "1.0.0"
+embedded-io-async = "0.6.1"
+log = "0.4.22"
+
+[dev-dependencies]
+tokio = { version = "1.40.0", features = ["full", "macros"] }
+
+[features]
+default = ["std"]
+std = []
