@@ -218,7 +218,7 @@ where
 
         // move the terminal's cursor back
         for _ in self.cursor_index..self.end_index {
-            self.uart.write(&[0x08]).await?;
+            self.write_byte(0x08).await?;
         }
         Ok(())
     }
@@ -261,11 +261,6 @@ where
 
     async fn write_buffer(&mut self, range: core::ops::Range<usize>) -> Result<(), Error> {
         self.uart.write(&self.buffer[range]).await?;
-        Ok(())
-    }
-
-    async fn write_bytes(&mut self, buffer: &[u8]) -> Result<(), Error> {
-        self.uart.write(buffer).await?;
         Ok(())
     }
 }
