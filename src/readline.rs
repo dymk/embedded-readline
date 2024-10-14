@@ -1,4 +1,4 @@
-use core::cell::{RefCell, RefMut};
+use core::cell::{Ref, RefCell, RefMut};
 
 use embedded_io_async as eia;
 
@@ -43,6 +43,7 @@ pub enum ReadlineError<Error> {
     UnexpectedCtrl,
     UnexpectedChar(u8),
 }
+
 impl<Error> From<Error> for ReadlineError<Error> {
     fn from(e: Error) -> Self {
         ReadlineError::ReaderWriterError(e)
@@ -54,10 +55,17 @@ enum Loop {
     Break,
 }
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum HistoryStatus {
+    NotSearching,
+    Searching,
+}
+
 struct State<'u, 'b, ReaderWriter> {
     uart: RefCell<&'u mut ReaderWriter>,
     buffers: RefCell<Option<&'b mut dyn BufferTrait>>,
     status: ReadlineStatus,
+    history: HistoryStatus,
 }
 
 impl<'u, 'b, ReaderWriter, Error> State<'u, 'b, ReaderWriter>
@@ -66,8 +74,6 @@ where
     Error: eia::Error,
 {
     async fn readline(mut self) -> Result<&'b [u8], ReadlineError<Error>> {
-        self.borrow_buffers_mut().clear_current_line();
-
         loop {
             let byte = self.read_byte().await?;
             if matches!(self.process_byte(byte).await?, Loop::Break) {
@@ -76,19 +82,21 @@ where
         }
 
         let buffers = self.buffers.take().unwrap();
-        let line = buffers.current_line();
+        // buffers.debug();
+        let line = buffers.push_history();
         Ok(line.start_to_cursor())
     }
 
-    // fn borrow_buffers(&self) -> Ref<dyn BufferTrait> {
-    //     Ref::map(self.buffers.borrow(), |opt| opt.as_deref().unwrap())
-    // }
+    fn borrow_buffers(&self) -> Ref<dyn BufferTrait> {
+        Ref::map(self.buffers.borrow(), |opt| opt.as_deref().unwrap())
+    }
 
     fn borrow_buffers_mut(&self) -> RefMut<dyn BufferTrait> {
         RefMut::map(self.buffers.borrow_mut(), |opt| opt.as_deref_mut().unwrap())
     }
 
     async fn process_byte(&mut self, byte: u8) -> Result<Loop, ReadlineError<Error>> {
+        // log::info!("byte: {:#02X}", byte);
         match (byte, self.status) {
             (b'\n', _) | (b'\r', _) => return Ok(Loop::Break),
             // ESC = 0x1B
@@ -131,6 +139,14 @@ where
                 self.write_spaces(num_deleted).await?;
                 self.write_caret_back(num_deleted).await?;
                 *line.end_index_mut() = line.cursor_index();
+            }
+            (0x0E, ReadlineStatus::Char) => {
+                // ctrl+n, next history line
+                self.handle_go_history(false).await?;
+            }
+            (0x10, ReadlineStatus::Char) => {
+                // ctrl+p, previous history line
+                self.handle_go_history(true).await?;
             }
             (0x17, ReadlineStatus::Char) => {
                 self.handle_delete_word().await?;
@@ -238,20 +254,19 @@ where
     }
 
     async fn handle_control(&mut self, byte: u8) -> Result<(), ReadlineError<Error>> {
-        let mut buffers = self.borrow_buffers_mut();
-        let line = buffers.current_line_mut();
-
         match byte {
-            // A = up arrow key
             b'A' => {
-                // see if there is a previous line in the history
+                // up arrow key
+                return self.handle_go_history(true).await;
             }
-            // B = down arrow key
             b'B' => {
-                // see if there is a next line in the history
+                // B arrow key
+                return self.handle_go_history(false).await;
             }
             b'C' => {
                 // right arrow key
+                let mut buffers = self.borrow_buffers_mut();
+                let line = buffers.current_line_mut();
                 if line.cursor_index() >= line.end_index() {
                     return Ok(());
                 }
@@ -260,6 +275,8 @@ where
             }
             b'D' => {
                 // left arrow key
+                let mut buffers = self.borrow_buffers_mut();
+                let line = buffers.current_line_mut();
                 if line.cursor_index() == 0 {
                     return Ok(());
                 }
@@ -268,6 +285,38 @@ where
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn handle_go_history(&mut self, prev: bool) -> Result<(), ReadlineError<Error>> {
+        let mut buffers = self.borrow_buffers_mut();
+        let line = buffers.current_line_mut();
+        let cursor_index = line.cursor_index();
+        let end_index = line.end_index();
+        if prev {
+            buffers.select_prev_line();
+        } else {
+            buffers.select_next_line();
+        }
+        drop(buffers);
+        self.refresh_line(cursor_index, end_index).await?;
+        Ok(())
+    }
+
+    async fn refresh_line(&mut self, cursor_index: usize, end_index: usize) -> Result<(), Error> {
+        // go to the start of the line
+        let buffers = self.borrow_buffers();
+        let line = buffers.current_line();
+
+        self.write_caret_back(cursor_index).await?; // go to start of line
+        self.write_bytes(line.start_to_end()).await?; // write out new line
+        let new_end_index = line.end_index();
+        if end_index > new_end_index {
+            let num_spaces = end_index - new_end_index;
+            self.write_spaces(num_spaces).await?; // clear out rest of old line
+            self.write_caret_back(num_spaces).await?;
+        }
+        self.write_caret_back(line.num_after_cursor()).await?;
         Ok(())
     }
 
@@ -304,16 +353,103 @@ where
 pub async fn readline<'u, 'b, Error, ReaderWriter, const A: usize, const B: usize>(
     uart: &'u mut ReaderWriter,
     buffers: &'b mut Buffers<A, B>,
-) -> Result<&'b [u8], ReadlineError<Error>>
+) -> Result<&'b str, ReadlineError<Error>>
 where
     Error: eia::Error,
     ReaderWriter: eia::Read<Error = Error> + eia::Write<Error = Error>,
 {
-    State {
+    let ret = State {
         uart: RefCell::new(uart),
         buffers: RefCell::new(Some(buffers)),
         status: ReadlineStatus::Char,
+        history: HistoryStatus::NotSearching,
     }
     .readline()
-    .await
+    .await?;
+    Ok(core::str::from_utf8(ret).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{readline, test_reader_writer::TestReaderWriter, Buffers};
+
+    #[tokio::test]
+    async fn test_read_line_simple() {
+        let buffer = [&b"hello\n"[..], &b"world\n"[..]].join(&b""[..]);
+
+        let mut test_rw = TestReaderWriter::new(&buffer);
+        let mut buffers: Buffers<8, 2> = Buffers::default();
+
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &"hello"[..]);
+        assert_eq!(test_rw.data_to_write, b"hello"[..]);
+
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &"world"[..]);
+        assert_eq!(test_rw.data_to_write, b"helloworld"[..]);
+
+        assert_eq!(test_rw.totally_consumed(), true);
+    }
+
+    #[tokio::test]
+    async fn test_history_simple() {
+        let buffer = [
+            &b"omg!\n"[..],
+            &b"wtf?\n"[..],
+            &b"\x1B[Abbq~\n"[..], // up arrow+enter+'bbq~'
+        ]
+        .join(&b""[..]);
+
+        let mut test_rw = TestReaderWriter::new(&buffer);
+        let mut buffers: Buffers<8, 2> = Buffers::default();
+
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &"omg!"[..]);
+        assert_eq!(test_rw.data_to_write, b"omg!"[..]);
+
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &"wtf?"[..]);
+        assert_eq!(test_rw.data_to_write, b"omg!wtf?"[..]);
+
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &"wtf?bbq~"[..]);
+        assert_eq!(test_rw.data_to_write, b"omg!wtf?wtf?bbq~"[..]);
+
+        assert_eq!(test_rw.totally_consumed(), true);
+    }
+
+    #[tokio::test]
+    async fn test_history_up_down() {
+        let buffer = [
+            &b"yes!\n"[..],
+            // up arrow, up arrow,
+            // down arrow, down arrow
+            &b"\x1B[A\x1B[B\n"[..],
+        ]
+        .join(&b""[..]);
+
+        let mut test_rw = TestReaderWriter::new(&buffer);
+        let mut buffers: Buffers<8, 4> = Buffers::default();
+
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &"yes!"[..]);
+        assert_eq_u8(test_rw.data_to_write.as_ref(), b"yes!");
+
+        test_rw.data_to_write.clear();
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, &""[..]);
+        assert_eq_u8(
+            test_rw.data_to_write.as_ref(),
+            b"yes!\x08\x08\x08\x08    \x08\x08\x08\x08",
+        );
+    }
+
+    #[track_caller]
+    fn assert_eq_u8(actual: &[u8], expected: &[u8]) {
+        if actual != expected {
+            let actual = std::str::from_utf8(actual).unwrap();
+            let expected = std::str::from_utf8(expected).unwrap();
+            panic!("{:?} != {:?}", actual, expected);
+        }
+    }
 }
