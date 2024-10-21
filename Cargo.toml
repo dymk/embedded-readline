@@ -10,6 +10,7 @@ log = "0.4.22"
 
 [dev-dependencies]
 tokio = { version = "1.40.0", features = ["full", "macros"] }
+rstest = "0.23.0"
 
 [features]
 default = ["std"]

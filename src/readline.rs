@@ -1,8 +1,16 @@
 use core::cell::{Ref, RefCell, RefMut};
 
 use embedded_io_async as eia;
+extern crate std;
+use std::println;
 
-use crate::{buffers::BufferTrait, Buffers};
+// macro_rules! println {
+//     ($($tt:tt)+) => {};
+// }
+
+use crate::{buffers::BufferTrait, line_diff::LineDiff, Buffers};
+
+// extern crate std;
 
 /// Reads a line from the given UART interface into the provided buffer asynchronously.
 ///
@@ -55,17 +63,10 @@ enum Loop {
     Break,
 }
 
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-enum HistoryStatus {
-    NotSearching,
-    Searching,
-}
-
 struct State<'u, 'b, ReaderWriter> {
     uart: RefCell<&'u mut ReaderWriter>,
-    buffers: RefCell<Option<&'b mut dyn BufferTrait>>,
+    buffers: &'b mut dyn BufferTrait,
     status: ReadlineStatus,
-    history: HistoryStatus,
 }
 
 impl<'u, 'b, ReaderWriter, Error> State<'u, 'b, ReaderWriter>
@@ -74,6 +75,8 @@ where
     Error: eia::Error,
 {
     async fn readline(mut self) -> Result<&'b [u8], ReadlineError<Error>> {
+        self.buffers.current_line_mut().clear();
+
         loop {
             let byte = self.read_byte().await?;
             if matches!(self.process_byte(byte).await?, Loop::Break) {
@@ -81,24 +84,23 @@ where
             }
         }
 
-        let buffers = self.buffers.take().unwrap();
-        // buffers.debug();
-        let line = buffers.push_history();
-        Ok(line.start_to_cursor())
+        let line = self.buffers.push_history();
+        Ok(line.start_to_end())
     }
 
-    fn borrow_buffers(&self) -> Ref<dyn BufferTrait> {
-        Ref::map(self.buffers.borrow(), |opt| opt.as_deref().unwrap())
-    }
-
-    fn borrow_buffers_mut(&self) -> RefMut<dyn BufferTrait> {
-        RefMut::map(self.buffers.borrow_mut(), |opt| opt.as_deref_mut().unwrap())
+    async fn apply_diff(
+        &mut self,
+        f: impl FnOnce(&mut dyn BufferTrait) -> LineDiff,
+    ) -> Result<(), ReadlineError<Error>> {
+        let diff = f(self.buffers);
+        self.apply_line_diff(diff).await
     }
 
     async fn process_byte(&mut self, byte: u8) -> Result<Loop, ReadlineError<Error>> {
-        // log::info!("byte: {:#02X}", byte);
         match (byte, self.status) {
-            (b'\n', _) | (b'\r', _) => return Ok(Loop::Break),
+            (b'\n', _) | (b'\r', _) => {
+                return Ok(Loop::Break);
+            }
             // ESC = 0x1B
             (0x1B, ReadlineStatus::Char) => {
                 self.status = ReadlineStatus::Escape;
@@ -117,36 +119,25 @@ where
             }
             (0x01, ReadlineStatus::Char) => {
                 // go to the beginning of the line
-                // let mut buffers = self.borrow_buffers_mut();
-                let mut buffers = self.borrow_buffers_mut();
-                let line = buffers.current_line_mut();
-                self.write_caret_back(line.cursor_index()).await?;
-                *line.cursor_index_mut() = 0;
+                self.apply_diff(|buffers| buffers.cursor_to_start()).await?;
             }
             (0x05, ReadlineStatus::Char) => {
                 // go to the end of the line
-                let mut buffers = self.borrow_buffers_mut();
-                let line = buffers.current_line_mut();
-                self.write_bytes(line.cursor_to_end()).await?;
-                *line.cursor_index_mut() = line.end_index();
+                self.apply_diff(|buffers| buffers.cursor_to_end()).await?;
             }
             (0x0B, ReadlineStatus::Char) => {
                 // delete to end of line
-                let mut buffers = self.borrow_buffers_mut();
-                let line = buffers.current_line_mut();
-                let num_deleted = line.num_after_cursor();
-                *line.end_index_mut() = line.cursor_index();
-                self.write_spaces(num_deleted).await?;
-                self.write_caret_back(num_deleted).await?;
-                *line.end_index_mut() = line.cursor_index();
+                self.apply_diff(|buffers| buffers.delete_to_end()).await?;
             }
             (0x0E, ReadlineStatus::Char) => {
                 // ctrl+n, next history line
-                self.handle_go_history(false).await?;
+                self.apply_diff(|buffers| buffers.select_next_line())
+                    .await?;
             }
             (0x10, ReadlineStatus::Char) => {
                 // ctrl+p, previous history line
-                self.handle_go_history(true).await?;
+                self.apply_diff(|buffers| buffers.select_prev_line())
+                    .await?;
             }
             (0x17, ReadlineStatus::Char) => {
                 self.handle_delete_word().await?;
@@ -167,156 +158,79 @@ where
         Ok(Loop::Continue)
     }
 
+    async fn apply_line_diff(&mut self, line_diff: LineDiff) -> Result<(), ReadlineError<Error>> {
+        let line = self.buffers.current_line();
+
+        let move_caret = line_diff.move_caret_before;
+        if move_caret < 0 {
+            let move_caret = move_caret.unsigned_abs();
+            self.write_caret_back(move_caret).await?;
+        } else if move_caret > 0 {
+            let move_caret = move_caret.unsigned_abs();
+            let cursor_index = line.cursor_index();
+            let range_to_write = (cursor_index - move_caret)..move_caret;
+            self.write_bytes(&line.start_to_end()[range_to_write])
+                .await?;
+        }
+
+        let write_after_prefix = &line.start_to_end()[line_diff.write_after_prefix];
+        self.write_bytes(write_after_prefix).await?;
+        self.write_spaces(line_diff.clear_after_prefix).await?;
+
+        let move_caret = line_diff.move_caret_after;
+        if move_caret < 0 {
+            let move_caret = move_caret.unsigned_abs();
+            self.write_caret_back(move_caret).await?;
+        } else if move_caret > 0 {
+            panic!("invariant: caret after move cannot be positive");
+        }
+
+        Ok(())
+    }
+
     async fn handle_delete_word(&mut self) -> Result<(), ReadlineError<Error>> {
-        // delete to previous word's end
-        let mut buffers = self.borrow_buffers_mut();
-        let line = buffers.current_line_mut();
-        let old_cursor = line.cursor_index();
-
-        // find the most recent word
-        while line.cursor_index() > 0 && line.data()[line.cursor_index() - 1].is_ascii_whitespace()
-        {
-            *line.cursor_index_mut() -= 1;
-        }
-
-        // find the start of the word
-        while line.cursor_index() > 0 && !line.data()[line.cursor_index() - 1].is_ascii_whitespace()
-        {
-            *line.cursor_index_mut() -= 1;
-        }
-
-        // delete all the chars between the two
-        let num_deleted = old_cursor - line.cursor_index();
-        *line.end_index_mut() -= num_deleted;
-        let num_after_cursor = line.end_index() - line.cursor_index();
-
-        for i in 0..num_deleted {
-            let idx = line.cursor_index() + i;
-            line.data_mut()[idx] = line.data()[old_cursor + i];
-        }
-
-        // move the caret back & write out the moved letters
-        self.write_caret_back(num_deleted).await?;
-        self.write_bytes(line.cursor_to_end()).await?;
-        self.write_spaces(num_deleted).await?;
-        self.write_caret_back(num_deleted + num_after_cursor)
-            .await?;
-
+        std::println!(
+            "before delete word: {:?}",
+            self.buffers.current_line().start_to_end(),
+        );
+        self.apply_diff(|buffers| buffers.delete_word()).await?;
+        std::println!(
+            "after delete word: {:?}",
+            self.buffers.current_line().start_to_end(),
+        );
         Ok(())
     }
 
     async fn handle_backspace(&mut self) -> Result<(), ReadlineError<Error>> {
-        let mut buffers = self.borrow_buffers_mut();
-        let line = buffers.current_line_mut();
-
-        if line.cursor_index() == 0 {
-            return Ok(());
-        }
-
-        // move all the bytes after the cursor to the left
-        for i in line.cursor_index()..line.end_index() {
-            line.data_mut()[i - 1] = line.data()[i];
-        }
-        *line.end_index_mut() -= 1;
-        *line.cursor_index_mut() -= 1;
-        let num_after_cursor = line.end_index() - line.cursor_index();
-
-        // send all the chars after the cursor to the terminal
-        self.write_byte(0x08).await?;
-        self.write_bytes(line.cursor_to_end()).await?;
-        self.write_byte(b' ').await?;
-        self.write_caret_back(num_after_cursor + 1).await?;
-
-        Ok(())
+        self.apply_diff(|buffers| buffers.delete_chars(1)).await
     }
 
     /// Handle a character byte, put a character in the buffer and move the cursor
     async fn handle_char(&mut self, byte: u8) -> Result<(), ReadlineError<Error>> {
-        let mut buffers = self.borrow_buffers_mut();
-        let line = buffers.current_line_mut();
-
-        // move all the bytes after the cursor to the right
-        for i in (line.cursor_index()..line.end_index()).rev() {
-            line.data_mut()[i + 1] = line.data()[i];
-        }
-        let idx = line.cursor_index();
-        line.data_mut()[idx] = byte;
-        *line.end_index_mut() += 1;
-        *line.cursor_index_mut() += 1;
-
-        // send all the chars after the cursor to the terminal
-        let num_after_cursor = line.end_index() - line.cursor_index();
-        self.write_byte(byte).await?;
-        self.write_bytes(line.cursor_to_end()).await?;
-        self.write_caret_back(num_after_cursor).await?;
-
-        Ok(())
+        self.apply_diff(|buffers| buffers.insert_chars(&[byte]))
+            .await
     }
 
     async fn handle_control(&mut self, byte: u8) -> Result<(), ReadlineError<Error>> {
         match byte {
             b'A' => {
-                // up arrow key
-                return self.handle_go_history(true).await;
+                // up arrow key, go to previous history item
+                return self.apply_diff(|buffers| buffers.select_prev_line()).await;
             }
             b'B' => {
-                // B arrow key
-                return self.handle_go_history(false).await;
+                // B arrow key, go to next history item
+                return self.apply_diff(|buffers| buffers.select_next_line()).await;
             }
             b'C' => {
-                // right arrow key
-                let mut buffers = self.borrow_buffers_mut();
-                let line = buffers.current_line_mut();
-                if line.cursor_index() >= line.end_index() {
-                    return Ok(());
-                }
-                self.write_byte(line.data()[line.cursor_index()]).await?;
-                *line.cursor_index_mut() += 1;
+                // C arrow key, go right
+                return self.apply_diff(|buffers| buffers.move_cursor(1)).await;
             }
             b'D' => {
-                // left arrow key
-                let mut buffers = self.borrow_buffers_mut();
-                let line = buffers.current_line_mut();
-                if line.cursor_index() == 0 {
-                    return Ok(());
-                }
-                *line.cursor_index_mut() -= 1;
-                self.write_caret_back(1).await?;
+                // D arrow key, go left
+                return self.apply_diff(|buffers| buffers.move_cursor(-1)).await;
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    async fn handle_go_history(&mut self, prev: bool) -> Result<(), ReadlineError<Error>> {
-        let mut buffers = self.borrow_buffers_mut();
-        let line = buffers.current_line_mut();
-        let cursor_index = line.cursor_index();
-        let end_index = line.end_index();
-        if prev {
-            buffers.select_prev_line();
-        } else {
-            buffers.select_next_line();
-        }
-        drop(buffers);
-        self.refresh_line(cursor_index, end_index).await?;
-        Ok(())
-    }
-
-    async fn refresh_line(&mut self, cursor_index: usize, end_index: usize) -> Result<(), Error> {
-        // go to the start of the line
-        let buffers = self.borrow_buffers();
-        let line = buffers.current_line();
-
-        self.write_caret_back(cursor_index).await?; // go to start of line
-        self.write_bytes(line.start_to_end()).await?; // write out new line
-        let new_end_index = line.end_index();
-        if end_index > new_end_index {
-            let num_spaces = end_index - new_end_index;
-            self.write_spaces(num_spaces).await?; // clear out rest of old line
-            self.write_caret_back(num_spaces).await?;
-        }
-        self.write_caret_back(line.num_after_cursor()).await?;
         Ok(())
     }
 
@@ -345,6 +259,7 @@ where
 
     async fn write_bytes(&self, bytes: &[u8]) -> Result<(), Error> {
         let mut uart = self.uart.borrow_mut();
+        println!("write_bytes: {:?}", bytes);
         uart.write(bytes).await?;
         Ok(())
     }
@@ -360,9 +275,8 @@ where
 {
     let ret = State {
         uart: RefCell::new(uart),
-        buffers: RefCell::new(Some(buffers)),
+        buffers,
         status: ReadlineStatus::Char,
-        history: HistoryStatus::NotSearching,
     }
     .readline()
     .await?;
@@ -374,19 +288,19 @@ mod tests {
     use crate::{readline, test_reader_writer::TestReaderWriter, Buffers};
 
     #[tokio::test]
-    async fn test_read_line_simple() {
+    async fn test_simple() {
         let buffer = [&b"hello\n"[..], &b"world\n"[..]].join(&b""[..]);
 
         let mut test_rw = TestReaderWriter::new(&buffer);
         let mut buffers: Buffers<8, 2> = Buffers::default();
 
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &"hello"[..]);
-        assert_eq!(test_rw.data_to_write, b"hello"[..]);
+        assert_eq!(result, "hello");
+        assert_eq_u8(&test_rw.data_to_write, "hello");
 
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &"world"[..]);
-        assert_eq!(test_rw.data_to_write, b"helloworld"[..]);
+        assert_eq!(result, "world");
+        assert_eq_u8(&test_rw.data_to_write, "helloworld");
 
         assert_eq!(test_rw.totally_consumed(), true);
     }
@@ -404,16 +318,15 @@ mod tests {
         let mut buffers: Buffers<8, 2> = Buffers::default();
 
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &"omg!"[..]);
-        assert_eq!(test_rw.data_to_write, b"omg!"[..]);
+        assert_eq!(result, "omg!");
+        assert_eq_u8(&test_rw.data_to_write, "omg!");
 
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &"wtf?"[..]);
-        assert_eq!(test_rw.data_to_write, b"omg!wtf?"[..]);
+        assert_eq!(result, "wtf?");
+        assert_eq_u8(&test_rw.data_to_write, "omg!wtf?");
 
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &"wtf?bbq~"[..]);
-        assert_eq!(test_rw.data_to_write, b"omg!wtf?wtf?bbq~"[..]);
+        assert_eq!(result, "wtf?bbq~");
 
         assert_eq!(test_rw.totally_consumed(), true);
     }
@@ -432,23 +345,57 @@ mod tests {
         let mut buffers: Buffers<8, 4> = Buffers::default();
 
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &"yes!"[..]);
-        assert_eq_u8(test_rw.data_to_write.as_ref(), b"yes!");
+        assert_eq!(result, "yes!");
+        assert_eq_u8(test_rw.data_to_write.as_ref(), "yes!");
 
         test_rw.data_to_write.clear();
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
         assert_eq!(result, &""[..]);
         assert_eq_u8(
             test_rw.data_to_write.as_ref(),
-            b"yes!\x08\x08\x08\x08    \x08\x08\x08\x08",
+            "yes!\x08\x08\x08\x08    \x08\x08\x08\x08",
         );
     }
 
+    #[tokio::test]
+    async fn test_handle_delete_word() {
+        let buffer = b"a b\x17\n\x1B[A\x17\n";
+        let mut test_rw = TestReaderWriter::new(buffer);
+        let mut buffers: Buffers<32, 4> = Buffers::default();
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, "a ");
+        assert_eq_u8(test_rw.data_to_write.as_ref(), "a b\x08 \x08");
+
+        test_rw.data_to_write.clear();
+
+        std::println!("second line");
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, "");
+        assert_eq_u8(test_rw.data_to_write.as_ref(), "a \x08\x08  \x08\x08");
+
+        assert_eq!(test_rw.totally_consumed(), true);
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_word_middle() {
+        // "a b " <- <- CTRL+W ENTER
+        let buffer = b"a b \x1B[D\x1B[D\x17\n";
+        let mut test_rw = TestReaderWriter::new(buffer);
+        let mut buffers: Buffers<32, 4> = Buffers::default();
+        let result = readline(&mut test_rw, &mut buffers).await.unwrap();
+        assert_eq!(result, "b ");
+        assert_eq_u8(
+            test_rw.data_to_write.as_ref(),
+            "a b \x08\x08\x08\x08b   \x08\x08\x08\x08",
+        );
+
+        assert_eq!(test_rw.totally_consumed(), true);
+    }
+
     #[track_caller]
-    fn assert_eq_u8(actual: &[u8], expected: &[u8]) {
-        if actual != expected {
+    fn assert_eq_u8(actual: &[u8], expected: &str) {
+        if actual != expected.as_bytes() {
             let actual = std::str::from_utf8(actual).unwrap();
-            let expected = std::str::from_utf8(expected).unwrap();
             panic!("{:?} != {:?}", actual, expected);
         }
     }

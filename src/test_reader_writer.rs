@@ -2,8 +2,6 @@ use std::vec::Vec;
 
 use embedded_io_async as eia;
 
-use crate::{readline, Buffers};
-
 pub struct TestReaderWriter<'a> {
     pub data_to_read: &'a [u8],
     pub data_to_write: Vec<u8>,
