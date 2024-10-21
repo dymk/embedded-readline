@@ -138,75 +138,63 @@ mod tests {
         l
     }
 
+    macro_rules! assert_line_eq {
+        ($line:ident, $start_to_end:literal, $cursor_index:literal, $end_index:literal) => {
+            assert_eq!($line.start_to_end(), $start_to_end);
+            assert_eq!($line.cursor_index(), $cursor_index);
+            assert_eq!($line.end_index(), $end_index);
+        };
+    }
+
     #[test]
     fn test_line_insert_range() {
         let line = make_line();
-        assert_eq!(line.start_to_end(), b"hello");
-        assert_eq!(line.cursor_index(), 5);
-        assert_eq!(line.end_index(), 5);
+        assert_line_eq!(line, b"hello", 5, 5);
 
         let mut line = make_line();
         line.insert_range(2, b"ab");
-        assert_eq!(line.start_to_end(), b"heabllo");
-        assert_eq!(line.cursor_index(), 7);
-        assert_eq!(line.end_index(), 7);
+        assert_line_eq!(line, b"heabllo", 7, 7);
 
         let mut line = make_line();
         line.set_cursor_index(2);
         line.insert_range(2, b"ab");
-        assert_eq!(line.start_to_end(), b"heabllo");
-        assert_eq!(line.cursor_index(), 4);
-        assert_eq!(line.end_index(), 7);
+        assert_line_eq!(line, b"heabllo", 4, 7);
 
         let mut line = make_line();
         line.insert_range(0, b"ab");
         line.set_cursor_index(0);
-        assert_eq!(line.start_to_end(), b"abhello");
-        assert_eq!(line.cursor_index(), 0);
-        assert_eq!(line.end_index(), 7);
+        assert_line_eq!(line, b"abhello", 0, 7);
 
         let mut line = make_line();
         line.insert_range(0, b"");
-        assert_eq!(line.start_to_end(), b"hello");
+        assert_line_eq!(line, b"hello", 5, 5);
     }
 
     #[test]
     fn test_line_remove_range() {
         let mut line = make_line();
         line.remove_range(0..0);
-        assert_eq!(line.start_to_end(), b"hello");
-        assert_eq!(line.cursor_index(), 5);
-        assert_eq!(line.end_index(), 5);
+        assert_line_eq!(line, b"hello", 5, 5);
 
         line.remove_range(0..1);
-        assert_eq!(line.start_to_end(), b"ello");
-        assert_eq!(line.cursor_index(), 4);
-        assert_eq!(line.end_index(), 4);
+        assert_line_eq!(line, b"ello", 4, 4);
 
         let mut line = make_line();
         line.remove_range(2..4);
-        assert_eq!(line.start_to_end(), b"heo");
-        assert_eq!(line.cursor_index(), 3);
-        assert_eq!(line.end_index(), 3);
+        assert_line_eq!(line, b"heo", 3, 3);
 
         let mut line = make_line();
         line.remove_range(2..5);
-        assert_eq!(line.start_to_end(), b"he");
-        assert_eq!(line.cursor_index(), 2);
-        assert_eq!(line.end_index(), 2);
+        assert_line_eq!(line, b"he", 2, 2);
 
         let mut line = make_line();
         line.set_cursor_index(3);
         line.remove_range(2..4);
-        assert_eq!(line.start_to_end(), b"heo");
-        assert_eq!(line.cursor_index(), 2);
-        assert_eq!(line.end_index(), 3);
+        assert_line_eq!(line, b"heo", 2, 3);
 
         let mut line = make_line();
         line.set_cursor_index(2);
         line.remove_range(2..4);
-        assert_eq!(line.start_to_end(), b"heo");
-        assert_eq!(line.cursor_index(), 2);
-        assert_eq!(line.end_index(), 3);
+        assert_line_eq!(line, b"heo", 2, 3);
     }
 }

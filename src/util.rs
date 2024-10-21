@@ -107,14 +107,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case("", "", "", "", 0..0)]
-    #[case("   ", "", "", "", 0..3)]
-    #[case("", "   ", "", "   ", 0..0)]
-    #[case("hello world ", "", "hello ", "hello ", 6..12)]
-    #[case("hello world", " ", "hello ", "hello  ", 6..11)]
-    #[case("hello wo", "rld ", "hello ", "hello rld ", 6..8)]
-    #[case("hello ", "world ", "", "world ", 0..6)]
-    #[case("hello", " world ", "", " world ", 0..5)]
+    #[case("",             "",        "",       "",           0..0)]
+    #[case("   ",          "",        "",       "",           0..3)]
+    #[case("",             "   ",     "",       "   ",        0..0)]
+    #[case("hello world ", "",        "hello ", "hello ",     6..12)]
+    #[case("hello world",  " ",       "hello ", "hello  ",    6..11)]
+    #[case("hello wo",     "rld ",    "hello ", "hello rld ", 6..8)]
+    #[case("hello ",       "world ",  "",       "world ",     0..6)]
+    #[case("hello",        " world ", "",       " world ",    0..5)]
     fn test_simple_word_move(
         #[case] before_input: &str,
         #[case] after_input: &str,
@@ -125,8 +125,7 @@ mod tests {
         use crate::{line::Line, line_cursor::LineCursor as _};
 
         let buf = [before_input.as_bytes(), after_input.as_bytes()].concat();
-        let mut line = Line::<16>::default();
-        line.set_from_u8(&buf);
+        let mut line = Line::<16>::from_u8(&buf);
         line.set_cursor_index(before_input.len());
         let old_cursor = line.cursor_index();
         previous_word_cursor_position(&mut line);

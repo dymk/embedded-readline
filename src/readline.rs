@@ -1,16 +1,8 @@
-use core::cell::{Ref, RefCell, RefMut};
+use core::{cell::RefCell, ops::DerefMut};
 
 use embedded_io_async as eia;
-extern crate std;
-use std::println;
-
-// macro_rules! println {
-//     ($($tt:tt)+) => {};
-// }
 
 use crate::{buffers::BufferTrait, line_diff::LineDiff, Buffers};
-
-// extern crate std;
 
 /// Reads a line from the given UART interface into the provided buffer asynchronously.
 ///
@@ -160,44 +152,13 @@ where
 
     async fn apply_line_diff(&mut self, line_diff: LineDiff) -> Result<(), ReadlineError<Error>> {
         let line = self.buffers.current_line();
-
-        let move_caret = line_diff.move_caret_before;
-        if move_caret < 0 {
-            let move_caret = move_caret.unsigned_abs();
-            self.write_caret_back(move_caret).await?;
-        } else if move_caret > 0 {
-            let move_caret = move_caret.unsigned_abs();
-            let cursor_index = line.cursor_index();
-            let range_to_write = (cursor_index - move_caret)..move_caret;
-            self.write_bytes(&line.start_to_end()[range_to_write])
-                .await?;
-        }
-
-        let write_after_prefix = &line.start_to_end()[line_diff.write_after_prefix];
-        self.write_bytes(write_after_prefix).await?;
-        self.write_spaces(line_diff.clear_after_prefix).await?;
-
-        let move_caret = line_diff.move_caret_after;
-        if move_caret < 0 {
-            let move_caret = move_caret.unsigned_abs();
-            self.write_caret_back(move_caret).await?;
-        } else if move_caret > 0 {
-            panic!("invariant: caret after move cannot be positive");
-        }
-
+        let mut uart = self.uart.borrow_mut();
+        line_diff.apply(uart.deref_mut(), line).await?;
         Ok(())
     }
 
     async fn handle_delete_word(&mut self) -> Result<(), ReadlineError<Error>> {
-        std::println!(
-            "before delete word: {:?}",
-            self.buffers.current_line().start_to_end(),
-        );
         self.apply_diff(|buffers| buffers.delete_word()).await?;
-        std::println!(
-            "after delete word: {:?}",
-            self.buffers.current_line().start_to_end(),
-        );
         Ok(())
     }
 
@@ -235,33 +196,10 @@ where
     }
 
     async fn read_byte(&self) -> Result<u8, Error> {
-        let mut uart = self.uart.borrow_mut();
         let mut byte = [0];
+        let mut uart = self.uart.borrow_mut();
         uart.read(&mut byte).await?;
         Ok(byte[0])
-    }
-
-    async fn write_caret_back(&self, num: usize) -> Result<(), Error> {
-        for _ in 0..num {
-            self.write_byte(0x08).await?;
-        }
-        Ok(())
-    }
-    async fn write_spaces(&self, num: usize) -> Result<(), Error> {
-        for _ in 0..num {
-            self.write_byte(b' ').await?;
-        }
-        Ok(())
-    }
-    async fn write_byte(&self, byte: u8) -> Result<(), Error> {
-        self.write_bytes(&[byte]).await
-    }
-
-    async fn write_bytes(&self, bytes: &[u8]) -> Result<(), Error> {
-        let mut uart = self.uart.borrow_mut();
-        println!("write_bytes: {:?}", bytes);
-        uart.write(bytes).await?;
-        Ok(())
     }
 }
 
@@ -302,7 +240,7 @@ mod tests {
         assert_eq!(result, "world");
         assert_eq_u8(&test_rw.data_to_write, "helloworld");
 
-        assert_eq!(test_rw.totally_consumed(), true);
+        assert!(test_rw.totally_consumed());
     }
 
     #[tokio::test]
@@ -328,7 +266,7 @@ mod tests {
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
         assert_eq!(result, "wtf?bbq~");
 
-        assert_eq!(test_rw.totally_consumed(), true);
+        assert!(test_rw.totally_consumed());
     }
 
     #[tokio::test]
@@ -350,7 +288,7 @@ mod tests {
 
         test_rw.data_to_write.clear();
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
-        assert_eq!(result, &""[..]);
+        assert_eq!(result, "");
         assert_eq_u8(
             test_rw.data_to_write.as_ref(),
             "yes!\x08\x08\x08\x08    \x08\x08\x08\x08",
@@ -373,7 +311,7 @@ mod tests {
         assert_eq!(result, "");
         assert_eq_u8(test_rw.data_to_write.as_ref(), "a \x08\x08  \x08\x08");
 
-        assert_eq!(test_rw.totally_consumed(), true);
+        assert!(test_rw.totally_consumed());
     }
 
     #[tokio::test]
@@ -389,7 +327,7 @@ mod tests {
             "a b \x08\x08\x08\x08b   \x08\x08\x08\x08",
         );
 
-        assert_eq!(test_rw.totally_consumed(), true);
+        assert!(test_rw.totally_consumed());
     }
 
     #[track_caller]

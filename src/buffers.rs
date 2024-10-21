@@ -1,7 +1,7 @@
 use crate::{
     line::Line,
     line_cursor::LineCursor,
-    line_diff::{calc_line_diff, LineDiff},
+    line_diff::LineDiff,
     util::{get_two_mut_checked, previous_word_cursor_position},
 };
 
@@ -67,7 +67,7 @@ pub(crate) trait BufferTrait {
         let move_caret = self.current_line_mut().move_cursor(by);
         LineDiff {
             move_caret_before: move_caret,
-            write_after_prefix: 0..0,
+            write_after_prefix: None,
             clear_after_prefix: 0,
             move_caret_after: 0,
         }
@@ -93,7 +93,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         let num_after_cursor = line.num_after_cursor();
         LineDiff {
             move_caret_before: 0,
-            write_after_prefix: cursor_index..line.end_index(),
+            write_after_prefix: Some(cursor_index..line.end_index()),
             clear_after_prefix: 0,
             move_caret_after: -(num_after_cursor as isize),
         }
@@ -106,7 +106,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         if cursor_index == 0 {
             return LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 0,
                 move_caret_after: 0,
             };
@@ -116,9 +116,14 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         let range = (cursor_index - n)..cursor_index;
         let num_after_cursor = line.num_after_cursor();
         let num_removed = line.remove_range(range);
+        let write_after_prefix = if num_after_cursor == 0 {
+            None
+        } else {
+            Some(line.cursor_index()..line.end_index())
+        };
         LineDiff {
             move_caret_before: -(num_removed as isize),
-            write_after_prefix: line.cursor_index()..line.end_index(),
+            write_after_prefix,
             clear_after_prefix: num_removed,
             move_caret_after: -((num_removed + num_after_cursor) as isize),
         }
@@ -140,7 +145,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
             self.offset += 1;
         }
         let new = &self.lines[self.selected_idx()];
-        calc_line_diff(old, new)
+        LineDiff::from(old, new)
     }
 
     fn select_next_line(&mut self) -> LineDiff {
@@ -149,7 +154,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
             self.offset -= 1;
         }
         let new = &self.lines[self.selected_idx()];
-        calc_line_diff(old, new)
+        LineDiff::from(old, new)
     }
 
     fn push_history(&mut self) -> &dyn LineCursor {
@@ -168,7 +173,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         let num_to_clear = end_index - cursor_index;
         LineDiff {
             move_caret_before: 0,
-            write_after_prefix: 0..0,
+            write_after_prefix: None,
             clear_after_prefix: num_to_clear,
             move_caret_after: -(num_to_clear as isize),
         }
@@ -191,7 +196,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -204,7 +209,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 3,
                 move_caret_after: -3
             }
@@ -230,7 +235,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -4,
-                write_after_prefix: 0..4,
+                write_after_prefix: Some(0..4),
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -242,7 +247,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -4,
-                write_after_prefix: 0..4,
+                write_after_prefix: Some(0..4),
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -262,7 +267,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 3..4,
+                write_after_prefix: Some(3..4),
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -274,7 +279,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -1,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 1,
                 move_caret_after: -1
             }
@@ -290,7 +295,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -2,
-                write_after_prefix: 2..2,
+                write_after_prefix: None,
                 clear_after_prefix: 2,
                 move_caret_after: -2
             }
@@ -312,7 +317,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -6,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -323,7 +328,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 0..5,
+                write_after_prefix: Some(0..5),
                 clear_after_prefix: 1,
                 move_caret_after: -1
             }
@@ -334,7 +339,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -5,
-                write_after_prefix: 0..6,
+                write_after_prefix: Some(0..6),
                 clear_after_prefix: 0,
                 move_caret_after: -6
             }
@@ -351,7 +356,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 0..3,
+                write_after_prefix: Some(0..3),
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -362,7 +367,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -1,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -374,7 +379,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 0,
-                write_after_prefix: 2..4,
+                write_after_prefix: Some(2..4),
                 clear_after_prefix: 0,
                 move_caret_after: -1
             }
@@ -386,7 +391,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: 1,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 0,
                 move_caret_after: 0
             }
@@ -401,7 +406,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -4,
-                write_after_prefix: 5..5,
+                write_after_prefix: None,
                 clear_after_prefix: 4,
                 move_caret_after: -4
             }
@@ -413,7 +418,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -5,
-                write_after_prefix: 0..0,
+                write_after_prefix: None,
                 clear_after_prefix: 5,
                 move_caret_after: -5
             }
@@ -427,7 +432,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -1,
-                write_after_prefix: 4..4,
+                write_after_prefix: None,
                 clear_after_prefix: 1,
                 move_caret_after: -1
             }
@@ -441,7 +446,7 @@ mod tests {
             diff,
             LineDiff {
                 move_caret_before: -2,
-                write_after_prefix: 0..2,
+                write_after_prefix: Some(0..2),
                 clear_after_prefix: 2,
                 move_caret_after: -4
             }
