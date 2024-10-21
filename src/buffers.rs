@@ -40,52 +40,19 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
     }
 }
 
-pub(crate) trait BufferTrait {
-    fn current_line_mut(&mut self) -> &mut dyn LineCursor;
-    fn current_line(&self) -> &dyn LineCursor;
+// impl<const A: usize, const B: usize> Buffers<A, B> {}
 
-    fn select_prev_line(&mut self) -> LineDiff;
-    fn select_next_line(&mut self) -> LineDiff;
-    fn push_history(&mut self) -> &dyn LineCursor;
-
-    fn delete_word(&mut self) -> LineDiff;
-    fn insert_chars(&mut self, c: &[u8]) -> LineDiff;
-    fn delete_chars(&mut self, n: usize) -> LineDiff;
-    fn delete_to_end(&mut self) -> LineDiff;
-
-    fn cursor_to_end(&mut self) -> LineDiff {
-        let num_after_cursor = self.current_line().num_after_cursor();
-        self.move_cursor(num_after_cursor as isize)
-    }
-
-    fn cursor_to_start(&mut self) -> LineDiff {
-        let move_by = -(self.current_line().cursor_index() as isize);
-        self.move_cursor(move_by)
-    }
-
-    fn move_cursor(&mut self, by: isize) -> LineDiff {
-        let move_caret = self.current_line_mut().move_cursor(by);
-        LineDiff {
-            move_caret_before: move_caret,
-            write_after_prefix: None,
-            clear_after_prefix: 0,
-            move_caret_after: 0,
-        }
-    }
-}
-
-impl<const A: usize, const B: usize> Buffers<A, B> {}
-
-impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
-    fn current_line(&self) -> &dyn LineCursor {
+// impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
+impl<const A: usize, const B: usize> Buffers<A, B> {
+    pub(crate) fn current_line(&self) -> &dyn LineCursor {
         &self.lines[self.selected_idx()]
     }
 
-    fn current_line_mut(&mut self) -> &mut dyn LineCursor {
+    pub(crate) fn current_line_mut(&mut self) -> &mut dyn LineCursor {
         &mut self.lines[self.selected_idx()]
     }
 
-    fn insert_chars(&mut self, c: &[u8]) -> LineDiff {
+    pub(crate) fn insert_chars(&mut self, c: &[u8]) -> LineDiff {
         self.prepare_to_change_line();
         let line = self.current_line_mut();
         let cursor_index = line.cursor_index();
@@ -99,7 +66,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         }
     }
 
-    fn delete_chars(&mut self, n: usize) -> LineDiff {
+    pub(crate) fn delete_chars(&mut self, n: usize) -> LineDiff {
         self.prepare_to_change_line();
         let line = self.current_line_mut();
         let cursor_index = line.cursor_index();
@@ -129,7 +96,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         }
     }
 
-    fn delete_word(&mut self) -> LineDiff {
+    pub(crate) fn delete_word(&mut self) -> LineDiff {
         self.prepare_to_change_line();
         let line = self.current_line_mut();
         let old_cursor_index = line.cursor_index();
@@ -139,7 +106,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         self.delete_chars(num_removed)
     }
 
-    fn select_prev_line(&mut self) -> LineDiff {
+    pub(crate) fn select_prev_line(&mut self) -> LineDiff {
         let old = &self.lines[self.selected_idx()];
         if self.offset < self.last_idx {
             self.offset += 1;
@@ -148,7 +115,7 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         LineDiff::from(old, new)
     }
 
-    fn select_next_line(&mut self) -> LineDiff {
+    pub(crate) fn select_next_line(&mut self) -> LineDiff {
         let old = &self.lines[self.selected_idx()];
         if self.offset > 0 {
             self.offset -= 1;
@@ -157,14 +124,14 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
         LineDiff::from(old, new)
     }
 
-    fn push_history(&mut self) -> &dyn LineCursor {
+    pub(crate) fn push_history(&mut self) -> &dyn LineCursor {
         self.prepare_to_change_line();
         let line = &mut self.lines[self.selected_idx()];
         self.last_idx += 1;
         line
     }
 
-    fn delete_to_end(&mut self) -> LineDiff {
+    pub(crate) fn delete_to_end(&mut self) -> LineDiff {
         self.prepare_to_change_line();
         let line = self.current_line_mut();
         let cursor_index = line.cursor_index();
@@ -178,13 +145,34 @@ impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
             move_caret_after: -(num_to_clear as isize),
         }
     }
+
+    pub(crate) fn cursor_to_end(&mut self) -> LineDiff {
+        let num_after_cursor = self.current_line().num_after_cursor();
+        self.move_cursor(num_after_cursor as isize)
+    }
+
+    pub(crate) fn cursor_to_start(&mut self) -> LineDiff {
+        let move_by = -(self.current_line().cursor_index() as isize);
+        self.move_cursor(move_by)
+    }
+
+    pub(crate) fn move_cursor(&mut self, by: isize) -> LineDiff {
+        let move_caret = self.current_line_mut().move_cursor(by);
+        LineDiff {
+            move_caret_before: move_caret,
+            write_after_prefix: None,
+            clear_after_prefix: 0,
+            move_caret_after: 0,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{line_cursor::LineCursor, line_diff::LineDiff};
 
-    use super::{BufferTrait, Buffers};
+    // use super::{BufferTrait, Buffers};
+    use super::Buffers;
 
     #[test]
     fn test_buffers_delete_to_end() {
@@ -463,7 +451,10 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_current_line_eq(actual: &dyn BufferTrait, expected: &str) {
+    fn assert_current_line_eq<const A: usize, const B: usize>(
+        actual: &Buffers<A, B>,
+        expected: &str,
+    ) {
         assert_line_eq(actual.current_line(), expected)
     }
 }

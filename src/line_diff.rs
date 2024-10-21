@@ -3,9 +3,6 @@ use embedded_io_async as eia;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct LineDiff {
-    // old_cursor_index: usize,
-    // new_cursor_index: usize,
-    // prefix_length: usize,
     pub move_caret_before: isize,
     pub write_after_prefix: Option<core::ops::Range<usize>>,
     pub clear_after_prefix: usize,

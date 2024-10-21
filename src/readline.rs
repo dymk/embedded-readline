@@ -2,7 +2,7 @@ use core::{cell::RefCell, ops::DerefMut};
 
 use embedded_io_async as eia;
 
-use crate::{buffers::BufferTrait, line_diff::LineDiff, Buffers};
+use crate::{line_diff::LineDiff, Buffers};
 
 /// Reads a line from the given UART interface into the provided buffer asynchronously.
 ///
@@ -55,13 +55,13 @@ enum Loop {
     Break,
 }
 
-struct State<'u, 'b, ReaderWriter> {
+struct State<'u, 'b, ReaderWriter, const A: usize, const B: usize> {
     uart: RefCell<&'u mut ReaderWriter>,
-    buffers: &'b mut dyn BufferTrait,
+    buffers: &'b mut Buffers<A, B>,
     status: ReadlineStatus,
 }
 
-impl<'u, 'b, ReaderWriter, Error> State<'u, 'b, ReaderWriter>
+impl<'u, 'b, ReaderWriter, Error, const A: usize, const B: usize> State<'u, 'b, ReaderWriter, A, B>
 where
     ReaderWriter: eia::Read<Error = Error> + eia::Write<Error = Error>,
     Error: eia::Error,
@@ -82,7 +82,7 @@ where
 
     async fn apply_diff(
         &mut self,
-        f: impl FnOnce(&mut dyn BufferTrait) -> LineDiff,
+        f: impl FnOnce(&mut Buffers<A, B>) -> LineDiff,
     ) -> Result<(), ReadlineError<Error>> {
         let diff = f(self.buffers);
         self.apply_line_diff(diff).await
