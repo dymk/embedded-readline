@@ -1,4 +1,4 @@
-use crate::line_cursor::LineCursor;
+use crate::line::Line;
 
 pub fn get_two_mut_checked<T>(
     idx1: usize,
@@ -38,7 +38,7 @@ pub fn get_two_mut_checked<T>(
     }
 }
 
-pub fn previous_word_cursor_position(line: &mut dyn LineCursor) {
+pub fn previous_word_cursor_position<const LEN: usize>(line: &mut Line<LEN>) {
     // rewind past spaces
     while let Some(c) = line.at_cursor(-1) {
         // println!("space? 0x{:#02?}", c);
@@ -122,7 +122,7 @@ mod tests {
         #[case] expected_start_to_end: &str,
         #[case] expected_range: core::ops::Range<usize>,
     ) {
-        use crate::{line::Line, line_cursor::LineCursor as _};
+        use crate::line::Line;
 
         let buf = [before_input.as_bytes(), after_input.as_bytes()].concat();
         let mut line = Line::<16>::from_u8(&buf);

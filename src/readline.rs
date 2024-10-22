@@ -2,7 +2,7 @@ use core::{cell::RefCell, ops::DerefMut};
 
 use embedded_io_async as eia;
 
-use crate::{line_diff::LineDiff, Buffers};
+use crate::{line_diff::LineDiff, readline_error::ReadlineError, Buffers};
 
 /// Reads a line from the given UART interface into the provided buffer asynchronously.
 ///
@@ -35,33 +35,20 @@ enum ReadlineStatus {
     Ctrl,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum ReadlineError<Error> {
-    ReaderWriterError(Error),
-    BufferFullError,
-    UnexpectedEscape,
-    UnexpectedCtrl,
-    UnexpectedChar(u8),
-}
-
-impl<Error> From<Error> for ReadlineError<Error> {
-    fn from(e: Error) -> Self {
-        ReadlineError::ReaderWriterError(e)
-    }
-}
-
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 enum Loop {
     Continue,
     Break,
 }
 
-struct State<'u, 'b, ReaderWriter, const A: usize, const B: usize> {
+struct Readline<'u, 'b, ReaderWriter, const A: usize, const B: usize> {
     uart: RefCell<&'u mut ReaderWriter>,
     buffers: &'b mut Buffers<A, B>,
     status: ReadlineStatus,
 }
 
-impl<'u, 'b, ReaderWriter, Error, const A: usize, const B: usize> State<'u, 'b, ReaderWriter, A, B>
+impl<'u, 'b, ReaderWriter, Error, const A: usize, const B: usize>
+    Readline<'u, 'b, ReaderWriter, A, B>
 where
     ReaderWriter: eia::Read<Error = Error> + eia::Write<Error = Error>,
     Error: eia::Error,
@@ -71,7 +58,7 @@ where
 
         loop {
             let byte = self.read_byte().await?;
-            if matches!(self.process_byte(byte).await?, Loop::Break) {
+            if self.process_byte(byte).await? == Loop::Break {
                 break;
             }
         }
@@ -211,7 +198,7 @@ where
     Error: eia::Error,
     ReaderWriter: eia::Read<Error = Error> + eia::Write<Error = Error>,
 {
-    let ret = State {
+    let ret = Readline {
         uart: RefCell::new(uart),
         buffers,
         status: ReadlineStatus::Char,

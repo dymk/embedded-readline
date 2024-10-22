@@ -1,6 +1,5 @@
 use crate::{
     line::Line,
-    line_cursor::LineCursor,
     line_diff::LineDiff,
     util::{get_two_mut_checked, previous_word_cursor_position},
 };
@@ -44,11 +43,11 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
 
 // impl<const A: usize, const B: usize> BufferTrait for Buffers<A, B> {
 impl<const A: usize, const B: usize> Buffers<A, B> {
-    pub(crate) fn current_line(&self) -> &dyn LineCursor {
+    pub(crate) fn current_line(&self) -> &Line<A> {
         &self.lines[self.selected_idx()]
     }
 
-    pub(crate) fn current_line_mut(&mut self) -> &mut dyn LineCursor {
+    pub(crate) fn current_line_mut(&mut self) -> &mut Line<A> {
         &mut self.lines[self.selected_idx()]
     }
 
@@ -124,7 +123,7 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
         LineDiff::from(old, new)
     }
 
-    pub(crate) fn push_history(&mut self) -> &dyn LineCursor {
+    pub(crate) fn push_history(&mut self) -> &Line<A> {
         self.prepare_to_change_line();
         let line = &mut self.lines[self.selected_idx()];
         self.last_idx += 1;
@@ -169,10 +168,18 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{line_cursor::LineCursor, line_diff::LineDiff};
+    use crate::{line::Line, line_diff::LineDiff};
 
     // use super::{BufferTrait, Buffers};
     use super::Buffers;
+
+    #[test]
+    fn test_buffers_move_cursor_fwd() {
+        let mut buffers: Buffers<16, 1> = Buffers::default();
+        buffers.insert_chars(b"abcdefgh");
+        buffers.cursor_to_start();
+        buffers.cursor_to_end();
+    }
 
     #[test]
     fn test_buffers_delete_to_end() {
@@ -442,7 +449,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_line_eq(actual: &dyn LineCursor, expected: &str) {
+    fn assert_line_eq<const LEN: usize>(actual: &Line<LEN>, expected: &str) {
         let actual = actual.start_to_end();
         if actual != expected.as_bytes() {
             let actual = std::str::from_utf8(actual).unwrap();

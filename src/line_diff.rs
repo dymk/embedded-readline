@@ -1,5 +1,8 @@
-use crate::line_cursor::LineCursor;
+use core::cmp::Ordering;
+
 use embedded_io_async as eia;
+
+use crate::line::Line;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct LineDiff {
@@ -10,14 +13,14 @@ pub(crate) struct LineDiff {
 }
 
 impl LineDiff {
-    pub fn from(old_line: &dyn LineCursor, new_line: &dyn LineCursor) -> Self {
+    pub fn from<const LEN: usize>(old_line: &Line<LEN>, new_line: &Line<LEN>) -> Self {
         calc_line_diff(old_line, new_line)
     }
 
-    pub async fn apply<Writer, Error>(
+    pub async fn apply<Writer, Error, const LEN: usize>(
         self,
         writer: &mut Writer,
-        new_line: &dyn LineCursor,
+        new_line: &Line<LEN>,
     ) -> Result<(), Error>
     where
         Writer: eia::Write<Error = Error>,
@@ -26,16 +29,20 @@ impl LineDiff {
         let cursor_index = new_line.cursor_index();
         let line_data = new_line.start_to_end();
 
-        if self.move_caret_before < 0 {
-            let move_caret = self.move_caret_before.unsigned_abs();
-            for _ in 0..move_caret {
-                writer.write(&[0x08]).await?;
+        match self.move_caret_before.cmp(&0) {
+            Ordering::Less => {
+                let move_caret = self.move_caret_before.unsigned_abs();
+                for _ in 0..move_caret {
+                    writer.write(&[0x08]).await?;
+                }
             }
-        } else if self.move_caret_before > 0 {
-            let move_caret = self.move_caret_before.unsigned_abs();
-            let range_to_write = (cursor_index - move_caret)..move_caret;
-            let data_to_write = &line_data[range_to_write];
-            writer.write(data_to_write).await?;
+            Ordering::Greater => {
+                let move_caret = self.move_caret_before.unsigned_abs();
+                let range_to_write = cursor_index..(cursor_index + move_caret);
+                let data_to_write = &line_data[range_to_write];
+                writer.write(data_to_write).await?;
+            }
+            _ => {}
         }
 
         if let Some(write_after_prefix) = self.write_after_prefix {
@@ -59,17 +66,17 @@ impl LineDiff {
     }
 }
 
-fn calc_line_diff(old_line: &dyn LineCursor, new_line: &dyn LineCursor) -> LineDiff {
+fn calc_line_diff<const LEN: usize>(old_line: &Line<LEN>, new_line: &Line<LEN>) -> LineDiff {
     let old_data = old_line.start_to_end();
     let new_data = new_line.start_to_end();
 
     // find the common prefix between the two lines
     let mut prefix_length = 0;
-    for (i, (old, new)) in old_data.iter().zip(new_data.iter()).enumerate() {
+    for (old, new) in old_data.iter().zip(new_data.iter()) {
         if old != new {
             break;
         }
-        prefix_length = i + 1;
+        prefix_length += 1;
     }
 
     let (write_after_prefix, clear_after_prefix) =
@@ -111,7 +118,7 @@ fn calc_line_diff(old_line: &dyn LineCursor, new_line: &dyn LineCursor) -> LineD
 
 #[cfg(test)]
 mod tests {
-    use crate::{line::Line, line_cursor::LineCursor, line_diff::LineDiff};
+    use crate::{line::Line, line_diff::LineDiff, test_reader_writer::TestReaderWriter};
 
     #[test]
     fn test_calc_diff1() {
@@ -129,6 +136,33 @@ mod tests {
                 move_caret_after: -5
             }
         );
+    }
+
+    #[rstest::rstest]
+    #[case(LineDiff {
+        move_caret_before: 2,
+        write_after_prefix: Some(2..4),
+        clear_after_prefix: 1,
+        move_caret_after: -5
+    }, 0, b"heck", b"heck \x08\x08\x08\x08\x08")]
+    #[case(LineDiff {
+        move_caret_before: 0,
+        write_after_prefix: Some(2..4),
+        clear_after_prefix: 1,
+        move_caret_after: -5
+    }, 2, b"heck", b"ck \x08\x08\x08\x08\x08")]
+    async fn test_apply(
+        #[case] line_diff: LineDiff,
+        #[case] cursor_index: usize,
+        #[case] new_line: &[u8],
+        #[case] data_to_write: &[u8],
+    ) {
+        let mut new_line = Line::<10>::from_u8(new_line);
+        new_line.set_cursor_index(cursor_index);
+        let mut writer = TestReaderWriter::new(&[]);
+        let ok = line_diff.apply(&mut writer, &new_line).await;
+        assert_eq!(ok, Ok(()));
+        assert_eq!(writer.data_to_write, data_to_write);
     }
 
     #[rstest::rstest]

@@ -5,13 +5,14 @@ extern crate std;
 #[cfg(test)]
 mod test_reader_writer;
 
-mod buffers;
 mod line;
-mod line_cursor;
 mod line_diff;
 mod util;
 
-pub use buffers::Buffers;
-
+mod buffers;
 mod readline;
-pub use readline::{readline, ReadlineError};
+mod readline_error;
+
+pub use buffers::Buffers;
+pub use readline::readline;
+pub use readline_error::ReadlineError;

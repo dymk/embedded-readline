@@ -1,5 +1,3 @@
-use crate::line_cursor::LineCursor;
-
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Line<const LEN: usize> {
     data: [u8; LEN],
@@ -8,6 +6,7 @@ pub(crate) struct Line<const LEN: usize> {
 }
 
 impl<const LEN: usize> Line<LEN> {
+    #[cfg(test)]
     pub fn from_u8(data: &[u8]) -> Self {
         let mut line = Line::default();
         line.set_from_u8(data);
@@ -25,28 +24,29 @@ impl<const LEN: usize> Default for Line<LEN> {
     }
 }
 
-impl<const A: usize> LineCursor for Line<A> {
-    fn start_to_cursor(&self) -> &[u8] {
+impl<const A: usize> Line<A> {
+    #[cfg(test)]
+    pub(crate) fn start_to_cursor(&self) -> &[u8] {
         &self.data[..self.cursor_index]
     }
 
-    fn cursor_to_end(&self) -> &[u8] {
-        &self.data[self.cursor_index..self.end_index]
-    }
-
-    fn start_to_end(&self) -> &[u8] {
+    pub(crate) fn start_to_end(&self) -> &[u8] {
         &self.data[..self.end_index]
     }
 
-    fn cursor_index(&self) -> usize {
+    pub(crate) fn num_after_cursor(&self) -> usize {
+        self.end_index() - self.cursor_index()
+    }
+
+    pub(crate) fn cursor_index(&self) -> usize {
         self.cursor_index
     }
 
-    fn end_index(&self) -> usize {
+    pub(crate) fn end_index(&self) -> usize {
         self.end_index
     }
 
-    fn insert_range(&mut self, at: usize, data: &[u8]) -> usize {
+    pub(crate) fn insert_range(&mut self, at: usize, data: &[u8]) -> usize {
         let max_len = A - at;
         let data = if data.len() > max_len {
             &data[..max_len]
@@ -67,7 +67,7 @@ impl<const A: usize> LineCursor for Line<A> {
         data_len
     }
 
-    fn remove_range(&mut self, range: core::ops::Range<usize>) -> usize {
+    pub(crate) fn remove_range(&mut self, range: core::ops::Range<usize>) -> usize {
         // remove chars from [range.start to range.end)
         let range = if range.end > self.end_index {
             range.start..self.end_index
@@ -87,29 +87,30 @@ impl<const A: usize> LineCursor for Line<A> {
         range.len()
     }
 
-    fn set_from_u8(&mut self, data: &[u8]) {
+    #[cfg(test)]
+    pub(crate) fn set_from_u8(&mut self, data: &[u8]) {
         let data_len = data.len();
         self.data[0..data_len].copy_from_slice(data);
         self.cursor_index = data_len;
         self.end_index = data_len;
     }
 
-    fn set_from_cursor(&mut self, from: &dyn LineCursor) {
+    pub(crate) fn set_from_cursor(&mut self, from: &Self) {
         let data = from.start_to_end();
         self.data[..data.len()].copy_from_slice(data);
         self.cursor_index = from.cursor_index();
         self.end_index = from.end_index();
     }
 
-    fn set_cursor_index(&mut self, cursor_index: usize) {
+    pub(crate) fn set_cursor_index(&mut self, cursor_index: usize) {
         self.cursor_index = cursor_index;
     }
 
-    fn set_end_index(&mut self, end_index: usize) {
+    pub(crate) fn set_end_index(&mut self, end_index: usize) {
         self.end_index = end_index;
     }
 
-    fn move_cursor(&mut self, by: isize) -> isize {
+    pub(crate) fn move_cursor(&mut self, by: isize) -> isize {
         let cursor_index = self.cursor_index as isize;
         let end_index = self.end_index as isize;
         let new_cursor_index = (cursor_index + by).max(0).min(end_index);
@@ -118,7 +119,7 @@ impl<const A: usize> LineCursor for Line<A> {
         move_by
     }
 
-    fn at_cursor(&self, by: isize) -> Option<u8> {
+    pub(crate) fn at_cursor(&self, by: isize) -> Option<u8> {
         let idx = self.cursor_index as isize + by;
         if idx < 0 || idx > (self.end_index as isize) {
             None
@@ -126,11 +127,16 @@ impl<const A: usize> LineCursor for Line<A> {
             Some(self.data[idx as usize])
         }
     }
+
+    pub(crate) fn clear(&mut self) {
+        self.set_cursor_index(0);
+        self.set_end_index(0);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Line, LineCursor};
+    use super::Line;
 
     fn make_line() -> Line<10> {
         let mut l = Line::default();
