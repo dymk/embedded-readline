@@ -1,3 +1,8 @@
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LineError {
+    OutOfBounds,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Line<const LEN: usize> {
     data: [u8; LEN],
@@ -46,33 +51,36 @@ impl<const A: usize> Line<A> {
         self.end_index
     }
 
-    pub(crate) fn insert_range(&mut self, at: usize, data: &[u8]) -> usize {
-        let max_len = A - at;
-        let data = if data.len() > max_len {
-            &data[..max_len]
-        } else {
-            data
-        };
+    pub(crate) fn insert_range(&mut self, at: usize, data: &[u8]) -> Result<usize, LineError> {
+        let space_remaining = A - self.end_index;
+        if data.len() > space_remaining {
+            return Err(LineError::OutOfBounds);
+        }
+
+        let last_idx = at + data.len();
+        if last_idx > A {
+            return Err(LineError::OutOfBounds);
+        }
 
         let data_len = data.len();
-        let end_index = self.end_index;
-        for i in (at..end_index).rev() {
+        for i in (at..self.end_index).rev() {
             self.data[i + data_len] = self.data[i];
         }
-        self.data[at..at + data_len].copy_from_slice(data);
+        self.data[at..(at + data_len)].copy_from_slice(data);
         self.end_index += data_len;
         if at <= self.cursor_index {
             self.cursor_index += data_len;
         }
-        data_len
+        Ok(data_len)
     }
 
-    pub(crate) fn remove_range(&mut self, range: core::ops::Range<usize>) -> usize {
+    pub(crate) fn remove_range(
+        &mut self,
+        range: core::ops::Range<usize>,
+    ) -> Result<usize, LineError> {
         // remove chars from [range.start to range.end)
-        let range = if range.end > self.end_index {
-            range.start..self.end_index
-        } else {
-            range
+        if range.end > self.end_index {
+            return Err(LineError::OutOfBounds);
         };
 
         self.data
@@ -84,7 +92,7 @@ impl<const A: usize> Line<A> {
             self.cursor_index = range.start;
         }
 
-        range.len()
+        Ok(range.len())
     }
 
     #[cfg(test)]
@@ -136,6 +144,8 @@ impl<const A: usize> Line<A> {
 
 #[cfg(test)]
 mod tests {
+    use crate::line::LineError;
+
     use super::Line;
 
     fn make_line() -> Line<10> {
@@ -153,33 +163,48 @@ mod tests {
     }
 
     #[test]
+    fn test_line_overflow() {
+        let mut line: Line<0> = Line::default();
+        assert_eq!(line.insert_range(0, b""), Ok(0));
+        assert_eq!(line.insert_range(1, b""), Err(LineError::OutOfBounds));
+        assert_eq!(line.insert_range(0, b"a"), Err(LineError::OutOfBounds));
+
+        let mut line: Line<4> = Line::default();
+        assert_eq!(line.insert_range(0, b"heck"), Ok(4));
+        assert_eq!(line.start_to_end(), b"heck");
+        assert_eq!(line.insert_range(0, b""), Ok(0));
+        assert_eq!(line.insert_range(4, b""), Ok(0));
+        assert_eq!(line.insert_range(5, b""), Err(LineError::OutOfBounds));
+    }
+
+    #[test]
     fn test_line_insert_range() {
         let line = make_line();
         assert_line_eq!(line, b"hello", 5, 5);
 
         let mut line = make_line();
-        line.insert_range(2, b"ab");
+        assert_eq!(line.insert_range(2, b"ab"), Ok(2));
         assert_line_eq!(line, b"heabllo", 7, 7);
 
         let mut line = make_line();
         line.set_cursor_index(2);
-        line.insert_range(2, b"ab");
+        assert_eq!(line.insert_range(2, b"ab"), Ok(2));
         assert_line_eq!(line, b"heabllo", 4, 7);
 
         let mut line = make_line();
-        line.insert_range(0, b"ab");
+        line.insert_range(0, b"ab").unwrap();
         line.set_cursor_index(0);
         assert_line_eq!(line, b"abhello", 0, 7);
 
         let mut line = make_line();
-        line.insert_range(0, b"");
+        line.insert_range(0, b"").unwrap();
         assert_line_eq!(line, b"hello", 5, 5);
     }
 
     #[test]
     fn test_line_remove_range() {
         let mut line = make_line();
-        line.remove_range(0..0);
+        assert_eq!(line.remove_range(0..0), Ok(0));
         assert_line_eq!(line, b"hello", 5, 5);
 
         line.remove_range(0..1);
@@ -202,5 +227,8 @@ mod tests {
         line.set_cursor_index(2);
         line.remove_range(2..4);
         assert_line_eq!(line, b"heo", 2, 3);
+
+        let mut line: Line<0> = Line::default();
+        assert_eq!(line.remove_range(0..0), Ok(0));
     }
 }

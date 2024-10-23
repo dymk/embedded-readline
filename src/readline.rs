@@ -2,7 +2,7 @@ use core::{cell::RefCell, ops::DerefMut};
 
 use embedded_io_async as eia;
 
-use crate::{line_diff::LineDiff, readline_error::ReadlineError, Buffers};
+use crate::{line::LineError, line_diff::LineDiff, readline_error::ReadlineError, Buffers};
 
 /// Reads a line from the given UART interface into the provided buffer asynchronously.
 ///
@@ -57,7 +57,10 @@ where
         self.buffers.current_line_mut().clear();
 
         loop {
-            let byte = self.read_byte().await?;
+            let byte = match self.read_byte().await {
+                Ok(byte) => byte,
+                Err(err) => return Err(ReadlineError::ReaderWriterError(err)),
+            };
             if self.process_byte(byte).await? == Loop::Break {
                 break;
             }
@@ -69,9 +72,12 @@ where
 
     async fn apply_diff(
         &mut self,
-        f: impl FnOnce(&mut Buffers<A, B>) -> LineDiff,
+        f: impl FnOnce(&mut Buffers<A, B>) -> Result<LineDiff, LineError>,
     ) -> Result<(), ReadlineError<Error>> {
-        let diff = f(self.buffers);
+        let diff = match f(self.buffers) {
+            Ok(diff) => diff,
+            Err(err) => return Err(ReadlineError::LineError(err)),
+        };
         self.apply_line_diff(diff).await
     }
 
@@ -140,8 +146,10 @@ where
     async fn apply_line_diff(&mut self, line_diff: LineDiff) -> Result<(), ReadlineError<Error>> {
         let line = self.buffers.current_line();
         let mut uart = self.uart.borrow_mut();
-        line_diff.apply(uart.deref_mut(), line).await?;
-        Ok(())
+        match line_diff.apply(uart.deref_mut(), line).await {
+            Ok(_) => Ok(()),
+            Err(err) => Err(ReadlineError::ReaderWriterError(err)),
+        }
     }
 
     async fn handle_delete_word(&mut self) -> Result<(), ReadlineError<Error>> {
