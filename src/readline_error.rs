@@ -7,5 +7,6 @@ pub enum ReadlineError<Error> {
     BufferFullError,
     UnexpectedEscape,
     UnexpectedCtrl,
+    UnexpectedEof,
     UnexpectedChar(u8),
 }

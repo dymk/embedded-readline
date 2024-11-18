@@ -1,13 +1,37 @@
+use core::fmt::Debug;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LineError {
     OutOfBounds,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub(crate) struct Line<const LEN: usize> {
     data: [u8; LEN],
     cursor_index: usize,
     end_index: usize,
+}
+
+impl<const LEN: usize> PartialEq for Line<LEN> {
+    fn eq(&self, other: &Self) -> bool {
+        self.start_to_end() == other.start_to_end()
+            && self.cursor_index == other.cursor_index
+            && self.end_index == other.end_index
+    }
+}
+
+impl<const LEN: usize> Debug for Line<LEN> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Line")
+            .field("data", &core::str::from_utf8(self.start_to_end()).unwrap())
+            .field("cursor_index", &self.cursor_index)
+            .field("end_index", &self.end_index)
+            .field(
+                "after_end",
+                &core::str::from_utf8(&self.data[self.end_index..LEN]).unwrap(),
+            )
+            .finish()
+    }
 }
 
 impl<const LEN: usize> Line<LEN> {
@@ -207,25 +231,25 @@ mod tests {
         assert_eq!(line.remove_range(0..0), Ok(0));
         assert_line_eq!(line, b"hello", 5, 5);
 
-        line.remove_range(0..1);
+        line.remove_range(0..1).unwrap();
         assert_line_eq!(line, b"ello", 4, 4);
 
         let mut line = make_line();
-        line.remove_range(2..4);
+        line.remove_range(2..4).unwrap();
         assert_line_eq!(line, b"heo", 3, 3);
 
         let mut line = make_line();
-        line.remove_range(2..5);
+        line.remove_range(2..5).unwrap();
         assert_line_eq!(line, b"he", 2, 2);
 
         let mut line = make_line();
         line.set_cursor_index(3);
-        line.remove_range(2..4);
+        line.remove_range(2..4).unwrap();
         assert_line_eq!(line, b"heo", 2, 3);
 
         let mut line = make_line();
         line.set_cursor_index(2);
-        line.remove_range(2..4);
+        line.remove_range(2..4).unwrap();
         assert_line_eq!(line, b"heo", 2, 3);
 
         let mut line: Line<0> = Line::default();

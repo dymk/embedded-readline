@@ -883,6 +883,7 @@ dependencies = [
  "async-std",
  "embedded-hal",
  "embedded-io-async",
+ "futures-lite",
  "log",
  "rstest",
  "tokio",

@@ -1,6 +1,6 @@
 use core::{cell::RefCell, ops::DerefMut};
 
-use embedded_io_async as eia;
+use embedded_io_async::{self as eia, ReadExactError};
 
 use crate::{line::LineError, line_diff::LineDiff, readline_error::ReadlineError, Buffers};
 
@@ -57,10 +57,7 @@ where
         self.buffers.current_line_mut().clear();
 
         loop {
-            let byte = match self.read_byte().await {
-                Ok(byte) => byte,
-                Err(err) => return Err(ReadlineError::ReaderWriterError(err)),
-            };
+            let byte = self.read_byte().await?;
             if self.process_byte(byte).await? == Loop::Break {
                 break;
             }
@@ -96,11 +93,8 @@ where
             (b'[', ReadlineStatus::Escape) => {
                 self.status = ReadlineStatus::Ctrl;
             }
-            (b'[', _) => {
-                return Err(ReadlineError::UnexpectedCtrl);
-            }
             (0x08, ReadlineStatus::Char) | (0x7F, ReadlineStatus::Char) => {
-                self.handle_backspace().await?;
+                self.apply_diff(|buffers| buffers.delete_chars(1)).await?;
             }
             (0x01, ReadlineStatus::Char) => {
                 // go to the beginning of the line
@@ -125,18 +119,19 @@ where
                     .await?;
             }
             (0x17, ReadlineStatus::Char) => {
-                self.handle_delete_word().await?;
+                self.apply_diff(|buffers| buffers.delete_word()).await?;
             }
             (byte, ReadlineStatus::Char) => {
                 // other printable chars
-                self.handle_char(byte).await?;
+                self.apply_diff(|buffers| buffers.insert_chars(&[byte]))
+                    .await?;
             }
             (byte, ReadlineStatus::Escape) => {
                 return Err(ReadlineError::UnexpectedChar(byte));
             }
             (byte, ReadlineStatus::Ctrl) => {
-                self.handle_control(byte).await?;
                 self.status = ReadlineStatus::Char;
+                self.handle_control(byte).await?;
             }
         }
 
@@ -152,48 +147,29 @@ where
         }
     }
 
-    async fn handle_delete_word(&mut self) -> Result<(), ReadlineError<Error>> {
-        self.apply_diff(|buffers| buffers.delete_word()).await?;
-        Ok(())
-    }
-
-    async fn handle_backspace(&mut self) -> Result<(), ReadlineError<Error>> {
-        self.apply_diff(|buffers| buffers.delete_chars(1)).await
-    }
-
-    /// Handle a character byte, put a character in the buffer and move the cursor
-    async fn handle_char(&mut self, byte: u8) -> Result<(), ReadlineError<Error>> {
-        self.apply_diff(|buffers| buffers.insert_chars(&[byte]))
-            .await
-    }
-
     async fn handle_control(&mut self, byte: u8) -> Result<(), ReadlineError<Error>> {
         match byte {
-            b'A' => {
-                // up arrow key, go to previous history item
-                return self.apply_diff(|buffers| buffers.select_prev_line()).await;
-            }
-            b'B' => {
-                // B arrow key, go to next history item
-                return self.apply_diff(|buffers| buffers.select_next_line()).await;
-            }
-            b'C' => {
-                // C arrow key, go right
-                return self.apply_diff(|buffers| buffers.move_cursor(1)).await;
-            }
-            b'D' => {
-                // D arrow key, go left
-                return self.apply_diff(|buffers| buffers.move_cursor(-1)).await;
-            }
-            _ => {}
+            // up arrow key, go to previous history item
+            b'A' => self.apply_diff(|b| b.select_prev_line()).await,
+            // B arrow key, go to next history item
+            b'B' => self.apply_diff(|b| b.select_next_line()).await,
+            // C arrow key, go right
+            b'C' => self.apply_diff(|b| b.move_cursor_by(1)).await,
+            // D arrow key, go left
+            b'D' => self.apply_diff(|b| b.move_cursor_by(-1)).await,
+            _ => Ok(()),
         }
-        Ok(())
     }
 
-    async fn read_byte(&self) -> Result<u8, Error> {
+    async fn read_byte(&self) -> Result<u8, ReadlineError<Error>> {
         let mut byte = [0];
         let mut uart = self.uart.borrow_mut();
-        uart.read(&mut byte).await?;
+        if let Err(err) = uart.read_exact(&mut byte).await {
+            return Err(match err {
+                ReadExactError::UnexpectedEof => ReadlineError::UnexpectedEof,
+                ReadExactError::Other(err) => ReadlineError::ReaderWriterError(err),
+            });
+        }
         Ok(byte[0])
     }
 }
@@ -218,7 +194,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{readline, test_reader_writer::TestReaderWriter, Buffers};
+    use crate::{readline, test_reader_writer::TestReaderWriter, util::assert_eq_u8, Buffers};
 
     #[tokio::test]
     async fn test_simple() {
@@ -301,7 +277,6 @@ mod tests {
 
         test_rw.data_to_write.clear();
 
-        std::println!("second line");
         let result = readline(&mut test_rw, &mut buffers).await.unwrap();
         assert_eq!(result, "");
         assert_eq_u8(test_rw.data_to_write.as_ref(), "a \x08\x08  \x08\x08");
@@ -323,13 +298,5 @@ mod tests {
         );
 
         assert!(test_rw.totally_consumed());
-    }
-
-    #[track_caller]
-    fn assert_eq_u8(actual: &[u8], expected: &str) {
-        if actual != expected.as_bytes() {
-            let actual = std::str::from_utf8(actual).unwrap();
-            panic!("{:?} != {:?}", actual, expected);
-        }
     }
 }

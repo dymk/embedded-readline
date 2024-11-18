@@ -23,9 +23,9 @@ impl<const A: usize, const B: usize> Default for Buffers<A, B> {
 
 type LineResult = Result<LineDiff, LineError>;
 
-impl<const A: usize, const B: usize> Buffers<A, B> {
+impl<const MAX_LINE_LEN: usize, const MAX_LINES: usize> Buffers<MAX_LINE_LEN, MAX_LINES> {
     fn selected_idx(&self) -> usize {
-        (self.last_idx - self.offset) % B
+        (self.last_idx - self.offset) % MAX_LINES
     }
 
     fn prepare_to_change_line(&mut self) {
@@ -39,14 +39,36 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
             to_line.set_from_cursor(from_line);
         }
     }
+
+    pub fn debug(&self) {
+        let start_idx = if self.last_idx < MAX_LINES {
+            0
+        } else {
+            self.last_idx - MAX_LINES
+        };
+
+        log::info!("last_idx: {}, offset: {}", self.last_idx, self.offset);
+
+        for idx in start_idx..self.last_idx {
+            let idx = idx % MAX_LINES;
+            let line = &self.lines[idx];
+            log::info!(
+                " - {}: {}/{} = {}",
+                idx,
+                line.cursor_index(),
+                line.end_index(),
+                core::str::from_utf8(line.start_to_end()).unwrap()
+            );
+        }
+    }
 }
 
-impl<const A: usize, const B: usize> Buffers<A, B> {
-    pub(crate) fn current_line(&self) -> &Line<A> {
+impl<const MAX_LINE_LEN: usize, const MAX_LINES: usize> Buffers<MAX_LINE_LEN, MAX_LINES> {
+    pub(crate) fn current_line(&self) -> &Line<MAX_LINE_LEN> {
         &self.lines[self.selected_idx()]
     }
 
-    pub(crate) fn current_line_mut(&mut self) -> &mut Line<A> {
+    pub(crate) fn current_line_mut(&mut self) -> &mut Line<MAX_LINE_LEN> {
         &mut self.lines[self.selected_idx()]
     }
 
@@ -57,10 +79,10 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
         line.insert_range(cursor_index, c)?;
         let num_after_cursor = line.num_after_cursor();
         Ok(LineDiff {
-            move_caret_before: 0,
-            write_after_prefix: Some(cursor_index..line.end_index()),
-            clear_after_prefix: 0,
-            move_caret_after: -(num_after_cursor as isize),
+            caret_back_before: 0,
+            write_bytes: cursor_index..line.end_index(),
+            clear_bytes: 0,
+            caret_back_after: num_after_cursor,
         })
     }
 
@@ -69,28 +91,19 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
         let line = self.current_line_mut();
         let cursor_index = line.cursor_index();
         if cursor_index == 0 {
-            return Ok(LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: None,
-                clear_after_prefix: 0,
-                move_caret_after: 0,
-            });
+            return Ok(LineDiff::default());
         }
 
         let n = n.min(cursor_index);
         let range = (cursor_index - n)..cursor_index;
         let num_after_cursor = line.num_after_cursor();
         let num_removed = line.remove_range(range)?;
-        let write_after_prefix = if num_after_cursor == 0 {
-            None
-        } else {
-            Some(line.cursor_index()..line.end_index())
-        };
+        let write_bytes = line.cursor_index()..line.end_index();
         Ok(LineDiff {
-            move_caret_before: -(num_removed as isize),
-            write_after_prefix,
-            clear_after_prefix: num_removed,
-            move_caret_after: -((num_removed + num_after_cursor) as isize),
+            caret_back_before: num_removed,
+            write_bytes,
+            clear_bytes: num_removed,
+            caret_back_after: num_removed + num_after_cursor,
         })
     }
 
@@ -122,13 +135,6 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
         Ok(LineDiff::from(old, new))
     }
 
-    pub(crate) fn push_history(&mut self) -> &Line<A> {
-        self.prepare_to_change_line();
-        let line = &mut self.lines[self.selected_idx()];
-        self.last_idx += 1;
-        line
-    }
-
     pub(crate) fn delete_to_end(&mut self) -> LineResult {
         self.prepare_to_change_line();
         let line = self.current_line_mut();
@@ -137,330 +143,207 @@ impl<const A: usize, const B: usize> Buffers<A, B> {
         line.set_end_index(cursor_index);
         let num_to_clear = end_index - cursor_index;
         Ok(LineDiff {
-            move_caret_before: 0,
-            write_after_prefix: None,
-            clear_after_prefix: num_to_clear,
-            move_caret_after: -(num_to_clear as isize),
+            caret_back_before: 0,
+            write_bytes: cursor_index..cursor_index,
+            clear_bytes: num_to_clear,
+            caret_back_after: num_to_clear,
         })
     }
 
     pub(crate) fn cursor_to_end(&mut self) -> LineResult {
-        let num_after_cursor = self.current_line().num_after_cursor();
-        self.move_cursor(num_after_cursor as isize)
+        self.cursor_fwd_by(self.current_line().num_after_cursor())
     }
 
     pub(crate) fn cursor_to_start(&mut self) -> LineResult {
-        let move_by = -(self.current_line().cursor_index() as isize);
-        self.move_cursor(move_by)
+        self.cursor_back_by(self.current_line().cursor_index())
     }
 
-    pub(crate) fn move_cursor(&mut self, by: isize) -> LineResult {
-        let move_caret = self.current_line_mut().move_cursor(by);
+    pub(crate) fn move_cursor_by(&mut self, by: isize) -> LineResult {
+        if by < 0 {
+            self.cursor_back_by(by.unsigned_abs())
+        } else {
+            self.cursor_fwd_by(by.unsigned_abs())
+        }
+    }
+
+    pub(crate) fn cursor_fwd_by(&mut self, by: usize) -> LineResult {
+        let line = self.current_line_mut();
+        let old_cursor_index = line.cursor_index();
+        let move_caret = line.move_cursor(by as isize);
         Ok(LineDiff {
-            move_caret_before: move_caret,
-            write_after_prefix: None,
-            clear_after_prefix: 0,
-            move_caret_after: 0,
+            caret_back_before: 0,
+            write_bytes: old_cursor_index..old_cursor_index + (move_caret as usize),
+            clear_bytes: 0,
+            caret_back_after: 0,
         })
+    }
+
+    pub(crate) fn cursor_back_by(&mut self, by: usize) -> LineResult {
+        let line = self.current_line_mut();
+        let move_caret = line.move_cursor(-(by as isize));
+        Ok(LineDiff {
+            caret_back_before: move_caret.unsigned_abs(),
+            write_bytes: 0..0,
+            clear_bytes: 0,
+            caret_back_after: 0,
+        })
+    }
+
+    pub(crate) fn push_history(&mut self) -> &Line<MAX_LINE_LEN> {
+        self.prepare_to_change_line();
+
+        // reset all cursors to end of lines
+        for idx in self.last_idx.saturating_sub(MAX_LINES)..(self.last_idx + 1) {
+            let line = &mut self.lines[idx % MAX_LINES];
+            let end_index = line.end_index();
+            line.set_cursor_index(end_index);
+        }
+
+        let line = &mut self.lines[self.selected_idx()];
+        self.last_idx += 1;
+        line
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{line::Line, line_diff::LineDiff};
+    use core::panic;
+    use std::println;
+
+    use embedded_io_async::{ErrorType, Write};
+    use futures_lite::future::block_on;
+
+    use crate::{line::Line, make_line};
 
     // use super::{BufferTrait, Buffers};
-    use super::Buffers;
+    use super::{Buffers, LineResult};
+
+    #[derive(Debug, Default)]
+    struct BuffersTest<const LEN: usize> {
+        buffers: Buffers<LEN, 16>,
+        console: Console<LEN>,
+    }
+    impl<const LEN: usize> BuffersTest<LEN> {
+        #[track_caller]
+        fn assert_op<F>(&mut self, f: F, expected_line: &Line<LEN>)
+        where
+            F: FnOnce(&mut Buffers<LEN, 16>) -> LineResult,
+        {
+            let line_diff = f(&mut self.buffers).unwrap();
+            let actual_line = self.buffers.current_line();
+            println!("line diff: {:?}", line_diff);
+            assert_eq!(actual_line, expected_line);
+            println!("actual line: {:?}", actual_line);
+            block_on(async {
+                line_diff
+                    .apply(&mut self.console, actual_line)
+                    .await
+                    .unwrap();
+            });
+            assert_eq!(
+                self.console.cursor,
+                actual_line.cursor_index(),
+                "cursor index mismatch"
+            );
+            let (console_data, console_data_rest) =
+                self.console.data.split_at(actual_line.end_index());
+            assert_eq!(console_data, expected_line.start_to_end());
+            assert!(
+                console_data_rest.iter().all(|chr| *chr == b' '),
+                "remainder of line is not all spaces: {:?}",
+                console_data_rest
+            );
+        }
+
+        fn push_history(&mut self) -> &Line<LEN> {
+            self.console = Default::default();
+            self.buffers.push_history()
+        }
+    }
+
+    #[derive(Debug)]
+    struct Console<const LEN: usize> {
+        data: [u8; LEN],
+        cursor: usize,
+    }
+    impl<const LEN: usize> Default for Console<LEN> {
+        fn default() -> Self {
+            Self {
+                data: [b' '; LEN],
+                cursor: 0,
+            }
+        }
+    }
+    impl<const LEN: usize> ErrorType for Console<LEN> {
+        type Error = embedded_io_async::ErrorKind;
+    }
+    impl<const LEN: usize> Write for Console<LEN> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            for c in buf {
+                match c {
+                    0x08 => {
+                        self.cursor -= 1;
+                    }
+                    _ if !c.is_ascii_control() => {
+                        self.data[self.cursor] = *c;
+                        self.cursor += 1;
+                    }
+                    _ => panic!("unexpected char: {:#02?}", c),
+                };
+            }
+            Ok(buf.len())
+        }
+    }
 
     #[test]
-    fn test_buffers_move_cursor_fwd() {
-        let mut buffers: Buffers<16, 1> = Buffers::default();
-        buffers.insert_chars(b"abcdefgh");
-        buffers.cursor_to_start();
-        buffers.cursor_to_end();
+    fn test_buffers_cursor_moving() {
+        let mut bt: BuffersTest<16> = BuffersTest::default();
+        bt.assert_op(|b| b.insert_chars(b"abcd"), &make_line!("abcd"|));
+        bt.assert_op(|b| b.cursor_to_start(), &make_line!(|"abcd"));
+        bt.assert_op(|b| b.cursor_to_end(), &make_line!("abcd"|));
+        bt.assert_op(|b| b.move_cursor_by(-1), &make_line!("abc" | "d"));
+        bt.assert_op(|b| b.move_cursor_by(2), &make_line!("abcd"|));
+        bt.assert_op(|b| b.move_cursor_by(-3), &make_line!("a" | "bcd"));
+        bt.assert_op(|b| b.move_cursor_by(-2), &make_line!(|"abcd"));
+
+        bt.assert_op(|b| b.move_cursor_by(1), &make_line!("a" | "bcd"));
+        bt.assert_op(|b| b.delete_chars(1), &make_line!(|"bcd"));
+        bt.assert_op(|b| b.insert_chars(b"012 "), &make_line!("012 " | "bcd"));
+        bt.assert_op(|b| b.delete_word(), &make_line!(|"bcd"));
+
+        bt.assert_op(|b| b.insert_chars(b"012 "), &make_line!("012 " | "bcd"));
+        bt.assert_op(|b| b.move_cursor_by(-1), &make_line!("012" | " bcd"));
+        bt.assert_op(|b| b.delete_word(), &make_line!(|" bcd"));
+
+        bt.assert_op(|b| b.insert_chars(b"012"), &make_line!("012" | " bcd"));
+        bt.assert_op(|b| b.move_cursor_by(3), &make_line!("012 bc" | "d"));
+        bt.assert_op(|b| b.delete_word(), &make_line!("012 " | "d"));
     }
 
     #[test]
     fn test_buffers_delete_to_end() {
-        let mut buffers: Buffers<16, 1> = Buffers::default();
-        buffers.insert_chars(b"abcdefgh");
-        let diff = buffers.delete_to_end().unwrap();
-        assert_current_line_eq(&buffers, "abcdefgh");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: None,
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        buffers.move_cursor(-3);
-        let diff = buffers.delete_to_end().unwrap();
-        assert_current_line_eq(&buffers, "abcde");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: None,
-                clear_after_prefix: 3,
-                move_caret_after: -3
-            }
-        );
+        let mut bt: BuffersTest<16> = BuffersTest::default();
+        bt.assert_op(|b| b.insert_chars(b"abcd"), &make_line!("abcd"|));
+        bt.assert_op(|b| b.move_cursor_by(-3), &make_line!("a" | "bcd"));
+        bt.assert_op(|b| b.delete_to_end(), &make_line!("a"|));
+        bt.assert_op(|b| b.move_cursor_by(-1), &make_line!(|"a"));
+        bt.assert_op(|b| b.delete_to_end(), &make_line!(|));
     }
 
     #[test]
     fn test_buffers_line_selection() {
-        let mut buffers: Buffers<16, 4> = Buffers::default();
-        buffers.insert_chars(b"abcd");
-        assert_current_line_eq(&buffers, "abcd");
-
-        let line = buffers.push_history();
-        assert_line_eq(line, "abcd");
-        assert_current_line_eq(&buffers, "");
-
-        buffers.insert_chars(b"defg");
-        assert_current_line_eq(&buffers, "defg");
-
-        let diff = buffers.select_prev_line().unwrap();
-        assert_current_line_eq(&buffers, "abcd");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -4,
-                write_after_prefix: Some(0..4),
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        let diff = buffers.select_next_line().unwrap();
-        assert_current_line_eq(&buffers, "defg");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -4,
-                write_after_prefix: Some(0..4),
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        let line = buffers.push_history();
-        assert_line_eq(line, "defg");
-
-        buffers.insert_chars(b"def").unwrap();
-        assert_current_line_eq(&buffers, "def");
-        assert_eq!(buffers.current_line().cursor_index(), 3);
-
-        let diff = buffers.select_prev_line().unwrap();
-        assert_current_line_eq(&buffers, "defg");
-        assert_eq!(buffers.current_line().cursor_index(), 4);
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: Some(3..4),
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        let diff = buffers.select_next_line().unwrap();
-        assert_current_line_eq(&buffers, "def");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -1,
-                write_after_prefix: None,
-                clear_after_prefix: 1,
-                move_caret_after: -1
-            }
-        );
-        buffers.push_history();
-
-        buffers.select_prev_line().unwrap();
-        buffers.select_prev_line().unwrap();
-        assert_current_line_eq(&buffers, "defg");
-        let diff = buffers.delete_chars(2).unwrap();
-        assert_current_line_eq(&buffers, "de");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -2,
-                write_after_prefix: None,
-                clear_after_prefix: 2,
-                move_caret_after: -2
-            }
-        );
-        buffers.push_history();
-    }
-
-    #[test]
-    fn test_buffers_move_caret_fwd() {
-        let mut buffers: Buffers<16, 8> = Buffers::default();
-
-        buffers.insert_chars(b"decks");
-        buffers.push_history();
-        buffers.insert_chars(b"delve");
-        buffers.push_history();
-        buffers.insert_chars(b"foobar");
-        let diff = buffers.cursor_to_start().unwrap();
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -6,
-                write_after_prefix: None,
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        let diff = buffers.select_prev_line().unwrap();
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: Some(0..5),
-                clear_after_prefix: 1,
-                move_caret_after: -1
-            }
-        );
-
-        let diff = buffers.select_next_line().unwrap();
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -5,
-                write_after_prefix: Some(0..6),
-                clear_after_prefix: 0,
-                move_caret_after: -6
-            }
-        );
-    }
-
-    #[test]
-    fn test_buffers_line_change() {
-        let mut buffers: Buffers<16, 3> = Buffers::default();
-
-        let diff = buffers.insert_chars(b"abc").unwrap();
-        assert_current_line_eq(&buffers, "abc");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: Some(0..3),
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        let diff = buffers.move_cursor(-1).unwrap();
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -1,
-                write_after_prefix: None,
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        let diff = buffers.insert_chars(b"d").unwrap();
-        assert_current_line_eq(&buffers, "abdc");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 0,
-                write_after_prefix: Some(2..4),
-                clear_after_prefix: 0,
-                move_caret_after: -1
-            }
-        );
-
-        let diff = buffers.move_cursor(1).unwrap();
-        assert_current_line_eq(&buffers, "abdc");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: 1,
-                write_after_prefix: None,
-                clear_after_prefix: 0,
-                move_caret_after: 0
-            }
-        );
-
-        buffers.insert_chars(b" efgh");
-        assert_current_line_eq(&buffers, "abdc efgh");
-
-        let diff = buffers.delete_word().unwrap();
-        assert_current_line_eq(&buffers, "abdc ");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -4,
-                write_after_prefix: None,
-                clear_after_prefix: 4,
-                move_caret_after: -4
-            }
-        );
-
-        let diff = buffers.delete_word().unwrap();
-        assert_current_line_eq(&buffers, "");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -5,
-                write_after_prefix: None,
-                clear_after_prefix: 5,
-                move_caret_after: -5
-            }
-        );
-
-        buffers.insert_chars(b"hello");
-        assert_current_line_eq(&buffers, "hello");
-        let diff = buffers.delete_chars(1).unwrap();
-        assert_current_line_eq(&buffers, "hell");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -1,
-                write_after_prefix: None,
-                clear_after_prefix: 1,
-                move_caret_after: -1
-            }
-        );
-
-        buffers.move_cursor(-2);
-        assert_eq!(buffers.current_line().cursor_index(), 2);
-        let diff = buffers.delete_chars(2).unwrap();
-        assert_current_line_eq(&buffers, "ll");
-        assert_eq!(
-            diff,
-            LineDiff {
-                move_caret_before: -2,
-                write_after_prefix: Some(0..2),
-                clear_after_prefix: 2,
-                move_caret_after: -4
-            }
-        );
-    }
-
-    #[track_caller]
-    fn assert_line_eq<const LEN: usize>(actual: &Line<LEN>, expected: &str) {
-        let actual = actual.start_to_end();
-        if actual != expected.as_bytes() {
-            let actual = std::str::from_utf8(actual).unwrap();
-            panic!("{:?} != {:?}", actual, expected);
-        }
-    }
-
-    #[track_caller]
-    fn assert_current_line_eq<const A: usize, const B: usize>(
-        actual: &Buffers<A, B>,
-        expected: &str,
-    ) {
-        assert_line_eq(actual.current_line(), expected)
+        let mut bt: BuffersTest<16> = BuffersTest::default();
+        bt.assert_op(|b| b.insert_chars(b"abcd"), &make_line!("abcd"|));
+        assert_eq!(bt.push_history(), &make_line!("abcd"|));
+        bt.assert_op(|b| b.insert_chars(b"efgh"), &make_line!("efgh"|));
+        bt.assert_op(|b| b.move_cursor_by(-1), &make_line!("efg" | "h"));
+        bt.assert_op(|b| b.select_prev_line(), &make_line!("abcd"|));
+        bt.assert_op(|b| b.move_cursor_by(-2), &make_line!("ab" | "cd"));
+        bt.assert_op(|b| b.select_next_line(), &make_line!("efg" | "h"));
+        bt.assert_op(|b| b.select_prev_line(), &make_line!("ab" | "cd"));
+        bt.assert_op(|b| b.insert_chars(b"1"), &make_line!("ab1" | "cd"));
+        bt.assert_op(|b| b.select_next_line(), &make_line!("ab1" | "cd"));
+        assert_eq!(bt.push_history(), &make_line!("ab1cd"|));
+        bt.assert_op(|b| b.select_prev_line(), &make_line!("ab1cd"|));
     }
 }

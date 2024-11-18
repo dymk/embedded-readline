@@ -59,10 +59,72 @@ pub fn previous_word_cursor_position<const LEN: usize>(line: &mut Line<LEN>) {
 }
 
 #[cfg(test)]
+#[track_caller]
+pub fn assert_eq_u8(actual: &[u8], expected: &str) {
+    if actual != expected.as_bytes() {
+        let actual = std::str::from_utf8(actual).unwrap();
+        panic!("{:?} != {:?}", actual, expected);
+    }
+}
+
+/// Builds a Line struct using string literals.
+/// The cursor position is indicated by a pipe (|) character.
+/// Usage:
+/// make_line!(|) => empty string, cursor @ 0
+/// make_line!("a"|) => "a", cursor @ 1
+/// make_line!(|"a") => "a", cursor @ 0
+#[macro_export]
+#[cfg(test)]
+macro_rules! make_line {
+    ($($head:literal)? | $($tail:literal)? $(; $len:literal)?) => {{
+        let bytes = make_line!(@concat $($head)? $($tail)?);
+        let cursor_index = make_line!(@len $($head)?);
+        make_line!(@impl bytes, cursor_index $(; $len)?)
+    }};
+
+    (@len) => { 0 };
+    (@len $lit:literal) => { $lit.len() };
+
+    (@concat) => { "" };
+    (@concat $a:literal) => { $a };
+    (@concat $a:literal $b:literal) => { [$a, $b].concat() };
+
+    (@impl $data:expr, $cursor:expr; $max_len:literal) => {{
+        let mut line = crate::line::Line::<$max_len>::from_u8($data.as_bytes());
+        line.set_cursor_index($cursor);
+        line
+    }};
+
+    (@impl $data:expr, $cursor:expr) => {{
+        let mut line = crate::line::Line::from_u8($data.as_bytes());
+        line.set_cursor_index($cursor);
+        line
+    }};
+}
+
+#[cfg(test)]
 mod tests {
     extern crate std;
 
-    use super::{get_two_mut_checked, previous_word_cursor_position};
+    use super::{assert_eq_u8, get_two_mut_checked, previous_word_cursor_position};
+    use crate::line::Line;
+
+    #[test]
+    fn test_line_macro() {
+        let line = make_line!["a" | "b"; 2];
+        assert_eq_u8(line.start_to_cursor(), "a");
+        assert_eq_u8(line.start_to_end(), "ab");
+
+        let line: Line<2> = make_line!["cd"|];
+        assert_eq_u8(line.start_to_cursor(), "cd");
+        assert_eq_u8(line.start_to_end(), "cd");
+
+        let line = make_line![|"ef"; 2];
+        assert_eq_u8(line.start_to_cursor(), "");
+        assert_eq_u8(line.start_to_end(), "ef");
+
+        assert_eq!(make_line!["abc"|], make_line!["abc"|; 4])
+    }
 
     #[test]
     fn test_middle_works() {
@@ -140,7 +202,7 @@ mod tests {
         );
         assert_eq!(expected_range, range);
 
-        line.remove_range(range);
+        line.remove_range(range).unwrap();
         assert_eq!(
             expected_start_to_end.as_bytes(),
             line.start_to_end(),
